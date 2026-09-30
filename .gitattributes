@@ -1,0 +1,5 @@
+# Keep Unix line endings for files used inside Linux containers.
+Dockerfile text eol=lf
+Caddyfile text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf

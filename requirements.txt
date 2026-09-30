@@ -1,0 +1,23 @@
+# Web server
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9   # file uploads
+httpx>=0.27               # server-side calls to Supabase Auth
+python-dotenv>=1.0        # load .env during local development
+
+# Sheet generation
+reportlab>=4.0
+qrcode>=7.4
+
+# Scanning / grading
+opencv-python-headless>=4.9
+numpy>=1.26
+Pillow>=10.0
+pillow-heif>=0.16         # HEIC (iPhone) photos
+PyMuPDF>=1.24             # render uploaded PDFs to images (AGPL)
+
+# Exports
+matplotlib>=3.8
+
+# Tests
+pytest>=8.0

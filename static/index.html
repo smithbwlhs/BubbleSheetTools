@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BubbleSheetTools</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="/">BubbleSheetTools</a>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="create" role="tab">Create sheets</button>
+      <button class="tab" data-tab="grade" role="tab">Grade exams</button>
+    </nav>
+    <div id="account" class="account"></div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="global-message" class="alert" hidden></div>
+
+  <!-- ============================================ CREATE SHEETS ======= -->
+  <section id="panel-create" class="panel">
+    <h1>Create bubble sheets</h1>
+    <p class="lead">No account needed. Each student gets a personal sheet with a QR code, and
+      the first page of the PDF is the <strong>answer key sheet</strong>. Fill that in yourself
+      and scan it when you grade.</p>
+
+    <form id="create-form" novalidate>
+      <div class="card">
+        <h2>1. Exam details</h2>
+        <div class="grid2">
+          <label>Class name <input id="class-name" maxlength="60" required placeholder="e.g. Biology, Period 3"></label>
+          <label>Exam name <input id="exam-name" maxlength="60" required placeholder="e.g. Unit 4 Test"></label>
+          <label>Multiple choice questions
+            <input id="num-questions" type="number" min="1" max="100" value="20" required></label>
+          <label>Answer choices per question
+            <select id="num-choices"></select></label>
+        </div>
+
+        <h3>Written responses <span class="muted">(hand graded)</span></h3>
+        <label class="inline">Number of written response boxes
+          <input id="num-written" type="number" min="0" max="20" value="0"></label>
+        <div id="written-list" class="written-list"></div>
+      </div>
+
+      <div class="card">
+        <h2>2. Students</h2>
+        <p class="muted">Paste names one per line, or on one line separated by commas. You can
+          also upload a CSV file. Names are only used to print the sheets and are not saved.</p>
+        <textarea id="names-text" rows="8" placeholder="Ada Lovelace&#10;Alan Turing&#10;Grace Hopper"></textarea>
+        <div class="row">
+          <label class="file-btn">Upload CSV instead
+            <input id="names-csv" type="file" accept=".csv,text/csv"></label>
+          <button type="button" id="check-names" class="secondary">Check names</button>
+          <span id="names-count" class="muted"></span>
+        </div>
+        <ul id="names-preview" class="chips" hidden></ul>
+      </div>
+
+      <div id="create-error" class="alert error" hidden></div>
+      <button type="submit" id="create-btn" class="primary big">Create bubble sheets (PDF)</button>
+    </form>
+  </section>
+
+  <!-- ============================================== GRADE EXAMS ======= -->
+  <section id="panel-grade" class="panel" hidden>
+    <h1>Grade exams</h1>
+
+    <!-- Signed out -->
+    <div id="auth-box" class="card narrow" hidden>
+      <div class="subtabs">
+        <button class="subtab active" data-auth="login">Sign in</button>
+        <button class="subtab" data-auth="signup">Create account</button>
+      </div>
+
+      <form id="login-form" class="auth-form" novalidate>
+        <label>Email <input id="login-email" type="email" autocomplete="email" required></label>
+        <label>Password <input id="login-password" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">Sign in</button>
+        <button class="link" type="button" id="forgot-btn">Forgot password?</button>
+      </form>
+
+      <form id="signup-form" class="auth-form" novalidate hidden>
+        <div class="grid2">
+          <label>First name <input id="su-first" autocomplete="given-name" required></label>
+          <label>Last name <input id="su-last" autocomplete="family-name" required></label>
+        </div>
+        <label>Email <input id="su-email" type="email" autocomplete="email" required></label>
+        <label>Password <span class="muted">(8+ characters)</span>
+          <input id="su-password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <label class="check"><input id="su-adult" type="checkbox"> I confirm that I am 18 years of age or older.</label>
+        <p class="muted small">We store only your name and email so you can sign in. No student
+          information is ever stored.</p>
+        <button class="primary" type="submit">Create account</button>
+      </form>
+
+      <form id="reset-form" class="auth-form" novalidate hidden>
+        <p>Choose a new password.</p>
+        <label>New password <input id="reset-password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <button class="primary" type="submit">Set password</button>
+      </form>
+
+      <div id="auth-message" class="alert" hidden></div>
+    </div>
+
+    <!-- Signed in, no session -->
+    <div id="start-box" class="card narrow" hidden>
+      <h2>Start grading</h2>
+      <p>Student data is kept <strong>only in memory</strong> while you grade. It is deleted when
+        you clear it, sign out, or after <span class="ttl">120</span> minutes of inactivity.
+        Download your results before leaving.</p>
+      <button id="start-btn" class="primary big">Start a grading session</button>
+    </div>
+
+    <!-- Active session -->
+    <div id="session-box" hidden>
+      <div class="session-bar">
+        <span id="exam-title" class="exam-title"></span>
+        <button id="clear-btn" class="danger small-btn">Clear all data &amp; start over</button>
+      </div>
+
+      <div class="card" id="step-key">
+        <h2>1. Answer key</h2>
+        <p class="muted">Upload the scanned <strong>answer key sheet</strong> (PDF, JPG, PNG or
+          HEIC), or a CSV file with one row per question (e.g. <code>1,B</code>, and
+          <code>2,AC</code> for more than one correct answer).</p>
+        <div class="row">
+          <label class="file-btn primary-file">Choose answer key file
+            <input id="key-file" type="file" accept=".csv,.pdf,.jpg,.jpeg,.png,.heic,.heif"></label>
+          <span id="key-status" class="muted"></span>
+        </div>
+        <div id="key-error" class="alert error" hidden></div>
+      </div>
+
+      <div class="card" id="step-upload">
+        <h2>2. Student sheets</h2>
+        <p id="upload-locked" class="alert warn">Upload the answer key first. Student sheets are
+          locked until a key is loaded.</p>
+        <div id="upload-area" hidden>
+          <p class="muted">Upload scans or photos (PDF, JPG, PNG or HEIC). You can upload one big
+            batch or a few at a time. Pages can be in any order or upside down.</p>
+          <label id="drop-zone" class="drop-zone">
+            <input id="sheet-files" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.tif,.tiff">
+            <span><strong>Choose files</strong> or drag them here</span>
+          </label>
+          <ul id="upload-log" class="upload-log"></ul>
+          <div id="page-messages"></div>
+          <button id="done-btn" class="primary">I'm done uploading &rarr; review results</button>
+        </div>
+      </div>
+
+      <div id="results-area" hidden>
+        <div class="card" id="step-review">
+          <h2>3. Check unreadable answers</h2>
+          <p id="review-summary" class="muted"></p>
+          <div id="flag-list" class="flag-list"></div>
+        </div>
+
+        <div class="card" id="step-results">
+          <h2>4. Results</h2>
+          <div id="multi-mode-box" class="row" hidden>
+            <label class="inline">Questions with more than one correct answer:
+              <select id="multi-mode">
+                <option value="all">student must mark all correct answers</option>
+                <option value="any">any correct answer counts (no wrong ones)</option>
+              </select></label>
+          </div>
+          <div class="table-wrap"><table id="results-table"></table></div>
+
+          <h3>Downloads</h3>
+          <div class="downloads">
+            <a class="button primary" data-export="results.csv">Results CSV</a>
+            <a class="button secondary" data-export="item_analysis.csv">Question analysis CSV</a>
+            <a class="button secondary" data-export="score_distribution.png">Score distribution PNG</a>
+            <a class="button secondary" data-export="most_missed.png">Most missed PNG</a>
+            <a class="button secondary" data-export="choice_distribution.png">Choice distribution PNG</a>
+            <a class="button secondary" data-export="all_results.zip">Everything (ZIP)</a>
+          </div>
+          <div class="charts">
+            <img data-chart="score_distribution.png" alt="Histogram of student scores">
+            <img data-chart="most_missed.png" alt="Questions ranked by number of students who missed them">
+            <img data-chart="choice_distribution.png" alt="Stacked bars showing which answer choices students picked for each question">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap footer muted small">
+  BubbleSheetTools &middot; Student information is never stored. &middot;
+  <a href="https://github.com/smithbwlhs/BubbleSheetTools">Source code (GPL-3.0)</a>
+</footer>
+</body>
+</html>

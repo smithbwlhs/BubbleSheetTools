@@ -1,0 +1,8 @@
+# Replace with your domain (its DNS A record must point at the droplet).
+bubblesheets.example.com {
+	encode gzip
+	request_body {
+		max_size 45MB
+	}
+	reverse_proxy app:8000
+}

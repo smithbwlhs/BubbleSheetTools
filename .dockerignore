@@ -1,0 +1,8 @@
+.venv
+.git
+.env
+test_output
+tests
+__pycache__
+*.pyc
+initial_prompt.md

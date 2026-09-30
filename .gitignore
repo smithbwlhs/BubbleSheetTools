@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Secrets -- never commit real credentials
+.env
+
+# Local test output
+test_output/
