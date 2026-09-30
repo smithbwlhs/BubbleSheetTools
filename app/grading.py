@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from .answer_key import AnswerKey, AnswerKeyError, parse_key_csv
+from .results_import import ImportedResults, parse_results_csv
 from .scanner.align import AlignError, locate_page
 from .scanner.bubbles import QuestionRead, read_bubbles, row_snippet_png
 from .scanner.loader import UploadError, load_pages
@@ -44,9 +45,9 @@ class Flag:
     """A question that could not be read with confidence."""
 
     question: int
-    reason: str               # "unclear", "multiple" or "blank"
+    reason: str               # "unclear", "multiple", "blank" or "csv"
     detected: frozenset[int]  # what the scanner thinks is marked
-    snippet_png: bytes        # cropped image of the row, for the teacher
+    snippet_png: bytes        # cropped image of the row (empty when restored from a CSV)
     resolved: bool = False
 
     def describe(self) -> str:
@@ -54,22 +55,38 @@ class Flag:
             "unclear": "A bubble is faint or partly erased.",
             "multiple": "More than one bubble is filled in.",
             "blank": "No bubble is filled in.",
+            "csv": "Still marked for checking in the uploaded results CSV "
+                   "(no scan image is available; check the paper sheet).",
         }[self.reason]
 
 
 @dataclass
 class StudentResult:
-    index: int                                   # roster position from the QR code
+    id: int          # unique within this grading session (what the web page refers to)
     name: str
+    class_name: str = ""
+    exam_id: str = ""                # print batch, from the QR code
+    roster_index: int | None = None  # position in that batch's roster, if known
     answers: dict[int, frozenset[int]] | None = None  # None until page 1 is scanned
     flags: dict[int, Flag] = field(default_factory=dict)
     written_scores: dict[int, float | None] = field(default_factory=dict)
     pages_seen: set[int] = field(default_factory=set)
-    rescanned: bool = False
+    notes: list[str] = field(default_factory=list)   # e.g. "rescanned", "late scan"
 
     @property
     def open_flags(self) -> list[Flag]:
         return [f for f in self.flags.values() if not f.resolved]
+
+    @property
+    def sheet_id(self) -> str:
+        """Batch + roster number, e.g. "3f9c01ab-07" (blank if unknown)."""
+        if self.exam_id and self.roster_index is not None:
+            return f"{self.exam_id}-{self.roster_index:02d}"
+        return ""
+
+    def add_note(self, note: str) -> None:
+        if note not in self.notes:
+            self.notes.append(note)
 
 
 @dataclass
@@ -87,12 +104,46 @@ class GradingSession:
     key: AnswerKey | None = None
     key_source: str = ""
     spec: ExamSpec | None = None
+    # Print batches whose sheets belong to this session. Usually one; several
+    # when results CSVs from different class periods are combined.
+    exam_ids: set[str] = field(default_factory=set)
     students: dict[int, StudentResult] = field(default_factory=dict)
     messages: list[PageMessage] = field(default_factory=list)
+    imported_files: list[str] = field(default_factory=list)
     multi_mode: str = "all"
     done: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    _next_id: int = 1
 
+    # -------------------------------------------------------- students ----
+
+    def ordered_students(self) -> list[StudentResult]:
+        """Students grouped by class, then in roster (or name) order."""
+        return sorted(self.students.values(), key=lambda s: (
+            s.class_name.lower(), s.exam_id,
+            s.roster_index if s.roster_index is not None else 10_000, s.name.lower()))
+
+    def class_names(self) -> list[str]:
+        names = sorted({s.class_name for s in self.students.values() if s.class_name})
+        return names or ([self.spec.class_name] if self.spec and self.spec.class_name else [])
+
+    def _add_student(self, **fields) -> StudentResult:
+        student = StudentResult(id=self._next_id, **fields)
+        self.students[student.id] = student
+        self._next_id += 1
+        return student
+
+    def _find_student(self, exam_id: str, roster_index: int | None,
+                      name: str) -> StudentResult | None:
+        """Is this student already in the session? Match on sheet ID when both
+        sides know it, otherwise on name (older CSVs have no sheet IDs)."""
+        for s in self.students.values():
+            if s.exam_id and exam_id and s.roster_index is not None and roster_index is not None:
+                if s.exam_id == exam_id and s.roster_index == roster_index:
+                    return s
+            elif s.name.strip().lower() == name.strip().lower():
+                return s
+        return None
     # ------------------------------------------------------------ key ----
 
     def set_key_from_upload(self, filename: str, data: bytes) -> None:
@@ -114,7 +165,72 @@ class GradingSession:
                     "Sheets have already been graded with the current key. "
                     "Start a new grading session to use a different key.")
             self.key, self.spec, self.key_source = key, spec, filename
+            self.exam_ids = {spec.exam_id} if spec else set()
             self.touch()
+
+    # ------------------------------------------------- results imports ----
+
+    def import_results(self, filename: str, data: bytes) -> dict:
+        """Load (or merge in) a results CSV previously downloaded from this site."""
+        if not data:
+            raise AnswerKeyError(f"{filename} is empty.")
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("latin-1")  # some Excel "CSV" saves
+        imported = parse_results_csv(filename, text)
+
+        with self.lock:
+            self._merge_exam(imported, filename)
+            added = replaced = 0
+            for row in imported.students:
+                existing = self._find_student(row.exam_id, row.roster_index, row.name)
+                if existing is None:
+                    student = self._add_student(name=row.name, class_name=row.class_name,
+                                                exam_id=row.exam_id,
+                                                roster_index=row.roster_index)
+                    added += 1
+                else:
+                    student = existing
+                    student.add_note(f"replaced by {filename}")
+                    replaced += 1
+                student.answers = dict(row.answers) if row.answers is not None else None
+                student.written_scores = dict(row.written)
+                student.pages_seen = {1} if row.answers is not None else set()
+                student.flags = {
+                    q: Flag(q, "csv", student.answers.get(q, frozenset()), b"")
+                    for q in row.uncertain
+                }
+            self.imported_files.append(filename)
+            self.done = True
+            self.touch()
+        return {"file": filename, "added": added, "replaced": replaced,
+                "warnings": imported.warnings}
+
+    def _merge_exam(self, imported: ImportedResults, filename: str) -> None:
+        """Adopt the imported key/exam, or check it matches the one loaded."""
+        if self.key is None:
+            self.key = AnswerKey(answers=dict(imported.key), num_choices=imported.num_choices)
+            first_class = next((s.class_name for s in imported.students if s.class_name), "")
+            self.spec = ExamSpec(
+                class_name=first_class, exam_name=imported.exam_name,
+                num_questions=imported.num_questions, num_choices=imported.num_choices,
+                written_heights=imported.written_heights,
+                exam_id=min(imported.exam_ids, default="restored"))
+            self.key_source = filename
+            self.multi_mode = imported.multi_mode
+        else:
+            if dict(self.key.answers) != dict(imported.key):
+                raise AnswerKeyError(
+                    f"{filename} has a different answer key from the results already loaded, "
+                    "so it can't be combined with them.")
+            if len(self.spec.written_heights) != len(imported.written_heights):
+                raise AnswerKeyError(
+                    f"{filename} has a different number of written responses from the "
+                    "results already loaded.")
+            if imported.num_choices > self.spec.num_choices:
+                self.spec = ExamSpec(**{**self.spec.__dict__, "num_choices": imported.num_choices})
+        self.exam_ids |= imported.exam_ids
 
     # --------------------------------------------------------- uploads ----
 
@@ -164,17 +280,23 @@ class GradingSession:
 
         with self.lock:
             self._check_same_exam(spec)
-            student = self.students.get(who.student_index)
+            student = self._find_student(spec.exam_id, who.student_index, who.student_name)
             if student is None:
-                student = StudentResult(index=who.student_index, name=who.student_name)
-                student.written_scores = {n: None for n in range(1, len(spec.written_heights) + 1)}
-                self.students[who.student_index] = student
+                student = self._add_student(
+                    name=who.student_name, class_name=spec.class_name, exam_id=spec.exam_id,
+                    roster_index=who.student_index,
+                    written_scores={n: None for n in range(1, len(spec.written_heights) + 1)})
+                if self.imported_files:
+                    student.add_note("late scan")
+            elif not student.exam_id:
+                # Matched by name to a row from an older CSV; remember the sheet ID now.
+                student.exam_id, student.roster_index = spec.exam_id, who.student_index
 
             if page != 1:
                 student.pages_seen.add(page)
                 return None
             if student.answers is not None:
-                student.rescanned = True
+                student.add_note("rescanned")
 
         # Bubble reading is the slow part; do it outside the lock.
         layout = build_layout(spec)[0]
@@ -193,9 +315,10 @@ class GradingSession:
 
     def _check_same_exam(self, spec: ExamSpec) -> None:
         """Make sure an uploaded sheet belongs to the same exam as the key."""
-        if self.spec is None:
-            # Key came from a CSV: the first sheet defines the exam, but it
-            # must match the key's number of questions and choices.
+        if not self.exam_ids:
+            # Key came from a CSV (or an older results CSV without sheet IDs):
+            # the first sheet defines the print batch, but it must match the
+            # key's number of questions and choices.
             if self.key.num_questions != spec.num_questions:
                 raise PageProblem(
                     f"The answer key has {self.key.num_questions} questions but this sheet has "
@@ -204,8 +327,10 @@ class GradingSession:
             if too_high:
                 raise PageProblem(
                     f"The answer key uses choices this sheet doesn't have (question {too_high[0]}).")
-            self.spec = spec
-        elif spec.exam_id != self.spec.exam_id:
+            if self.spec is None:
+                self.spec = spec
+            self.exam_ids.add(spec.exam_id)
+        elif spec.exam_id not in self.exam_ids:
             raise PageProblem(
                 f"This sheet is from a different exam ({spec.class_name} - {spec.exam_name}, "
                 "different print batch) and was skipped.")
@@ -222,10 +347,10 @@ class GradingSession:
 
     # --------------------------------------------------------- editing ----
 
-    def resolve(self, student_index: int, question: int, answer: str) -> None:
+    def resolve(self, student_id: int, question: int, answer: str) -> None:
         """Teacher-confirmed answer for a flagged (or any) question."""
         with self.lock:
-            student = self._student(student_index)
+            student = self._student(student_id)
             if student.answers is None or question not in student.answers:
                 raise ValueError("That question was not found on this student's sheet.")
             student.answers[question] = parse_letters(answer, self.spec.num_choices)
@@ -233,9 +358,9 @@ class GradingSession:
                 student.flags[question].resolved = True
             self.touch()
 
-    def set_written_score(self, student_index: int, number: int, score: float | None) -> None:
+    def set_written_score(self, student_id: int, number: int, score: float | None) -> None:
         with self.lock:
-            student = self._student(student_index)
+            student = self._student(student_id)
             if number not in student.written_scores:
                 raise ValueError("That written response does not exist on this exam.")
             if score is not None and not 0 <= score <= 1000:
@@ -250,8 +375,8 @@ class GradingSession:
             self.multi_mode = mode
             self.touch()
 
-    def _student(self, index: int) -> StudentResult:
-        student = self.students.get(index)
+    def _student(self, student_id: int) -> StudentResult:
+        student = self.students.get(student_id)
         if student is None:
             raise ValueError("Student not found in this grading session.")
         return student

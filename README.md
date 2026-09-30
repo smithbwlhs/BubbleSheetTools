@@ -14,6 +14,10 @@ scanned sheets, and export the results as CSV files and PNG charts.
   - `results.csv`: one row per student, with every answer
   - `item_analysis.csv`: % correct, # missed and choice counts per question
   - `score_distribution.png`, `most_missed.png`, `choice_distribution.png`
+- **Continue from a results CSV** (teacher account): re-upload a `results.csv` from
+  earlier to regenerate the analysis (lost downloads), grade late students' sheets from the
+  same print batch, or combine several periods that used the same answer key. A student
+  who appears again replaces their earlier row, with a note.
 
 ## Privacy (COPPA)
 
@@ -57,6 +61,7 @@ app/
   sessions.py         in-memory grading sessions with expiry
   roster.py           parse pasted names / CSV rosters
   answer_key.py       parse CSV answer keys
+  results_import.py   read a results.csv back in (restore / combine / late scans)
   sheet_layout.py     one shared definition of sheet geometry and QR contents
   sheet_generator.py  build the PDF (ReportLab + qrcode)
   scanner/

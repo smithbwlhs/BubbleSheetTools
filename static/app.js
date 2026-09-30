@@ -406,9 +406,14 @@ function renderGrade(state) {
   $("#step-results").classList.toggle("done", state.done);
 
   // Step 1: key
-  $("#key-status").textContent = state.key
-    ? `Loaded from ${state.key.source} · ${state.key.num_questions} questions` : "No key loaded yet";
+  $("#key-status").textContent = !state.key ? "No key loaded yet"
+    : state.imported_files.length
+      ? `From results: ${state.imported_files.join(", ")} · ${state.key.num_questions} questions`
+      : `Loaded from ${state.key.source} · ${state.key.num_questions} questions`;
+  // The key can't change once students are graded against it.
   $("#key-file").disabled = state.students.length > 0;
+  $("#key-file").closest("label").title = state.students.length
+    ? "Start a new grading session to use a different answer key." : "";
 
   // Step 2: uploads, locked until there is a key
   show($("#upload-locked"), !state.key);
@@ -450,6 +455,23 @@ function setupGrading() {
     setAlert($("#global-message"), "");
     renderGrade(await api("/api/grade/start", { method: "POST" }));
   }));
+
+  // Continue from results CSV(s): start a fresh session, then load the files.
+  $("#start-import").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files);
+    e.target.value = "";
+    if (!files.length) return;
+    const ok = await handleApiError(() => api("/api/grade/start", { method: "POST" }));
+    if (!ok) return;
+    const loaded = await importResults(files, $("#start-message"));
+    if (!loaded) { await api("/api/grade/clear", { method: "POST" }).catch(() => {}); return; }
+    $("#step-results").scrollIntoView({ behavior: "smooth" });
+  });
+  $("#import-file").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files);
+    e.target.value = "";
+    if (files.length) await importResults(files, $("#key-error"));
+  });
 
   $("#clear-btn").addEventListener("click", () => {
     if (!confirm("Delete all grading data for this session? Download your results first.")) return;
@@ -502,6 +524,33 @@ function setupGrading() {
   });
 }
 
+/** Load results CSVs one at a time. Returns true if at least one loaded. */
+async function importResults(files, messageBox) {
+  const lines = [];
+  let kind = "ok";
+  let loaded = false;
+  for (const file of files) {
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const res = await api("/api/grade/import", { method: "POST", form });
+      const s = res.summary;
+      loaded = true;
+      lines.push(`${s.file}: ${s.added} student${s.added === 1 ? "" : "s"} loaded` +
+        (s.replaced ? `, ${s.replaced} replaced` : "") + ".");
+      if (s.warnings.length) { lines.push(...s.warnings); kind = "warn"; }
+      renderGrade(res.state);
+    } catch (err) {
+      lines.push(`${file.name}: ${err.message}`);
+      kind = "error";
+      if (err.status === 409) { renderGrade(null); break; }
+    }
+  }
+  setAlert(messageBox, lines, kind);
+  if (loaded && messageBox.id !== "key-error") setAlert($("#key-error"), lines, kind);
+  return loaded;
+}
+
 /** Upload files one at a time so each gets its own progress line. */
 async function uploadFiles(files) {
   if (!files.length) return;
@@ -540,8 +589,9 @@ function renderFlags(state) {
   const missing = state.students.filter((s) => !s.bubble_page_read);
   let summary = state.flags.length === 0
     ? "Every bubble was read clearly. Nothing to check."
-    : `${open} of ${state.flags.length} flagged answer${state.flags.length === 1 ? "" : "s"} still ` +
-      "need checking. Look at the image, select what the student marked, and click Confirm. " +
+    : `${open} of ${state.flags.length} flagged answer${state.flags.length === 1 ? "" : "s"} ` +
+      `still need${open === 1 ? "s" : ""} checking. Look at the image (or the paper sheet), ` +
+      "select what the student marked, and click Confirm. " +
       "Unchecked answers are scored as read by the scanner and marked “?” in the CSV.";
   if (missing.length) {
     summary += ` Missing bubble page for: ${missing.map((s) => s.name).join(", ")}.`;
@@ -579,8 +629,8 @@ function renderFlags(state) {
         el("div", { class: "flag-note" }, f.description +
           (f.detected ? ` Scanner read: ${f.detected}.` : " Scanner read: blank.") +
           (f.multi_correct ? " (This question has more than one correct answer.)" : "")),
-        el("img", { src: `/api/grade/snippet/${f.student_index}/${f.question}.png`,
-                    alt: `Scanned row for question ${f.question}`, loading: "lazy" })),
+        f.has_image ? el("img", { src: `/api/grade/snippet/${f.student_index}/${f.question}.png`,
+                    alt: `Scanned row for question ${f.question}`, loading: "lazy" }) : null),
       el("div", {},
         el("div", { class: "choices", role: "group", "aria-label": "Student's answer" }, buttons),
         el("div", { class: "row" }, confirmBtn,
@@ -597,16 +647,20 @@ function renderResults(state) {
 
   const nWritten = state.exam.num_written;
   const table = $("#results-table");
-  const head = el("tr", {}, el("th", {}, "Student"), el("th", {}, "Score"), el("th", {}, "%"),
+  // Show a Class column only when results from several classes are combined.
+  const showClass = new Set(state.students.map((s) => s.class_name)).size > 1;
+  const head = el("tr", {}, el("th", {}, "Student"), showClass ? el("th", {}, "Class") : null,
+    el("th", {}, "Score"), el("th", {}, "%"),
     Array.from({ length: nWritten }, (_, i) => el("th", {}, `Written ${i + 1}`)),
     el("th", {}, "Notes"));
   const rows = state.students.map((s) => {
     const notes = [];
     if (!s.bubble_page_read) notes.push("bubble page not scanned");
     if (s.open_flags) notes.push(`${s.open_flags} to check`);
-    if (s.rescanned) notes.push("rescanned");
+    notes.push(...s.notes);
     return el("tr", {},
       el("td", {}, s.name),
+      showClass ? el("td", {}, s.class_name) : null,
       el("td", {}, s.score === null ? "—" : `${s.score} / ${s.possible}`),
       el("td", {}, s.percent === null ? "—" : `${s.percent}%`),
       s.written.map((w) => el("td", {}, writtenInput(s, w))),

@@ -15,6 +15,7 @@ Routes
     POST /api/grade/start       begin a new grading session
     GET  /api/grade/state       everything the grading screen shows
     POST /api/grade/key         upload the answer key (CSV, or scanned key sheet)
+    POST /api/grade/import      continue from (or combine) results CSVs downloaded earlier
     POST /api/grade/upload      upload one file of student sheets
     POST /api/grade/done        teacher is finished uploading
     POST /api/grade/resolve     teacher's answer for a flagged question
@@ -246,21 +247,23 @@ def _state(session: GradingSession) -> dict:
     spec, key = session.spec, session.key
     students, flags = [], []
     total_q = len(key.answers) if key else 0
-    for idx, s in sorted(session.students.items()):
+    for s in session.ordered_students():
         score = session.score(s) if (key and s.answers is not None) else None
         students.append({
-            "index": idx, "name": s.name, "score": score, "possible": total_q,
+            "index": s.id, "name": s.name, "class_name": s.class_name, "sheet_id": s.sheet_id,
+            "score": score, "possible": total_q,
             "percent": round(100 * score / total_q, 1) if score is not None and total_q else None,
             "bubble_page_read": s.answers is not None, "pages_seen": sorted(s.pages_seen),
-            "open_flags": len(s.open_flags), "rescanned": s.rescanned,
+            "open_flags": len(s.open_flags), "notes": s.notes,
             "written": [{"number": n, "score": v} for n, v in sorted(s.written_scores.items())],
         })
         for q, f in sorted(s.flags.items()):
             flags.append({
-                "student_index": idx, "student": s.name, "question": q, "reason": f.reason,
+                "student_index": s.id, "student": s.name, "question": q, "reason": f.reason,
                 "description": f.describe(), "detected": letters(f.detected),
                 "answer": letters(s.answers.get(q, frozenset())), "resolved": f.resolved,
                 "multi_correct": len(key.answers.get(q, ())) > 1,
+                "has_image": bool(f.snippet_png),
             })
     return {
         "key": None if key is None else {
@@ -268,13 +271,14 @@ def _state(session: GradingSession) -> dict:
             "multi_answer_questions": [q for q, a in key.answers.items() if len(a) > 1],
         },
         "exam": None if spec is None else {
-            "class_name": spec.class_name, "exam_name": spec.exam_name,
+            "class_name": " / ".join(session.class_names()), "exam_name": spec.exam_name,
             "num_questions": spec.num_questions, "num_choices": spec.num_choices,
             "num_written": len(spec.written_heights),
         },
         "students": students,
         "flags": flags,
         "messages": [m.__dict__ for m in session.messages],
+        "imported_files": session.imported_files,
         "multi_mode": session.multi_mode,
         "done": session.done,
         "expires_minutes": settings.session_ttl_minutes,
@@ -299,6 +303,19 @@ def grade_key(file: UploadFile = File(...), session: GradingSession = Depends(_s
     except AnswerKeyError as exc:
         raise _bad(str(exc))
     return _state(session)
+
+
+@app.post("/api/grade/import")
+def grade_import(file: UploadFile = File(...), session: GradingSession = Depends(_session)):
+    """Load or merge in a results CSV downloaded earlier from this site."""
+    name = file.filename or "results.csv"
+    if not name.lower().endswith((".csv", ".txt")):
+        raise _bad(f"{name} is not a CSV file. Upload the results.csv you downloaded.")
+    try:
+        summary = session.import_results(name, _read_upload(file))
+    except AnswerKeyError as exc:
+        raise _bad(str(exc))
+    return {"summary": summary, "state": _state(session)}
 
 
 @app.post("/api/grade/upload")

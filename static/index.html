@@ -136,7 +136,15 @@
           when you clear it, sign out, or after <span class="ttl">120</span> minutes of inactivity.
           Download your results before you leave.</p>
       </div>
-      <button id="start-btn" class="primary big">Start grading</button>
+      <div class="row">
+        <button id="start-btn" class="primary big">Start grading</button>
+        <label class="file-btn big-file">Continue from a results CSV
+          <input id="start-import" type="file" accept=".csv,text/csv" multiple></label>
+      </div>
+      <p class="hint start-note">Lost your downloads, or grading students who took the exam
+        late? Upload the <code>results.csv</code> you downloaded before. Choose several files to
+        combine class periods that used the same answer key.</p>
+      <div id="start-message" class="alert" hidden></div>
     </div>
 
     <!-- Active session -->
@@ -163,6 +171,13 @@
             <label class="file-btn solid">Choose answer key
               <input id="key-file" type="file" accept=".csv,.pdf,.jpg,.jpeg,.png,.heic,.heif"></label>
             <span id="key-status" class="hint"></span>
+          </div>
+          <div class="subsection">
+            <p class="hint">Or continue from earlier results: upload one or more
+              <code>results.csv</code> files downloaded from this site. They must share the same
+              answer key. A student who appears again replaces their earlier row.</p>
+            <label class="file-btn">Load results CSV
+              <input id="import-file" type="file" accept=".csv,text/csv" multiple></label>
           </div>
           <div id="key-error" class="alert error" hidden></div>
         </div>

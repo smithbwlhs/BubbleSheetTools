@@ -78,8 +78,8 @@ class ItemStats:
 
 
 def graded_students(session: GradingSession) -> list[StudentResult]:
-    """Students whose bubble page was read, in roster order."""
-    return [s for _, s in sorted(session.students.items()) if s.answers is not None]
+    """Students whose bubble page was read, by class then roster order."""
+    return [s for s in session.ordered_students() if s.answers is not None]
 
 
 def item_stats(session: GradingSession) -> list[ItemStats]:
@@ -111,36 +111,49 @@ def _csv_bytes(rows: list[list]) -> bytes:
 
 
 def results_csv(session: GradingSession) -> bytes:
+    """One row per student. Also re-uploadable (see results_import.py), so it
+    records the exam details in an EXAM INFO row and each student's sheet ID."""
     spec = session.spec
-    total_q = len(session.key.answers)
+    questions = sorted(session.key.answers)
+    total_q = len(questions)
     n_written = len(spec.written_heights)
-    header = (["Student", "MC correct", "MC possible", "MC percent"]
-              + [f"Written {n}" for n in range(1, n_written + 1)]
-              + (["Total (MC + written)"] if n_written else [])
-              + ["Needs review"]
-              + [f"Q{q}" for q in sorted(session.key.answers)])
-    rows = [header]
-    rows.append(["ANSWER KEY", total_q, total_q, 100.0] + [""] * n_written
-                + ([""] if n_written else []) + [""]
-                + [letters(session.key.answers[q]) for q in sorted(session.key.answers)])
+    written_cols = [f"Written {n}" for n in range(1, n_written + 1)]
+    header = (["Student", "Class", "Sheet ID", "MC correct", "MC possible", "MC percent"]
+              + written_cols + (["Total (MC + written)"] if n_written else [])
+              + ["Needs review", "Notes"] + [f"Q{q}" for q in questions])
 
-    for _, s in sorted(session.students.items()):
+    def row(values: dict, answers: list[str]) -> list:
+        """Place named values under their header columns, then the answers."""
+        return [values.get(h, "") for h in header[:-total_q]] + answers
+
+    rows = [header]
+    rows.append(row({"Student": "EXAM INFO", "Class": f"exam={spec.exam_name}",
+                     "Sheet ID": f"questions={total_q}", "MC correct": f"choices={spec.num_choices}",
+                     "MC possible": "written=" + ";".join(f"{h:g}" for h in spec.written_heights),
+                     "MC percent": f"scoring={session.multi_mode}",
+                     "Needs review": "ids=" + ";".join(sorted(session.exam_ids))},
+                    [""] * total_q))
+    rows.append(row({"Student": "ANSWER KEY", "MC correct": total_q, "MC possible": total_q,
+                     "MC percent": 100.0},
+                    [letters(session.key.answers[q]) for q in questions]))
+
+    for s in session.ordered_students():
+        base = {"Student": s.name, "Class": s.class_name, "Sheet ID": s.sheet_id,
+                "MC possible": total_q, "Notes": "; ".join(s.notes)}
         if s.answers is None:
-            rows.append([s.name, "", total_q, "", *[""] * n_written,
-                         *([""] if n_written else []), "Bubble page not scanned"])
+            rows.append(row({**base, "Needs review": "Bubble page not scanned"}, [""] * total_q))
             continue
         correct = session.score(s)
-        written = [s.written_scores.get(n) for n in range(1, n_written + 1)]
-        row = [s.name, correct, total_q, round(100 * correct / total_q, 1)]
-        row += ["" if w is None else w for w in written]
-        if n_written:
-            row.append(correct + sum(w for w in written if w is not None))
+        written = {f"Written {n}": s.written_scores.get(n) for n in range(1, n_written + 1)}
+        total = correct + sum(w for w in written.values() if w is not None)
         open_flags = sorted(f.question for f in s.open_flags)
-        row.append(", ".join(f"Q{q}" for q in open_flags))
-        for q in sorted(session.key.answers):
-            ans = letters(s.answers.get(q, frozenset()))
-            row.append(ans + ("?" if q in open_flags else ""))
-        rows.append(row)
+        values = {**base, "MC correct": correct, "MC percent": round(100 * correct / total_q, 1),
+                  **{k: ("" if v is None else v) for k, v in written.items()},
+                  "Total (MC + written)": total,
+                  "Needs review": ", ".join(f"Q{q}" for q in open_flags)}
+        answers = [letters(s.answers.get(q, frozenset())) + ("?" if q in open_flags else "")
+                   for q in questions]
+        rows.append(row(values, answers))
     return _csv_bytes(rows)
 
 
@@ -172,7 +185,9 @@ def _style(ax, grid_axis: str) -> None:
 
 
 def _title(session: GradingSession, what: str) -> str:
-    return f"{what}\n{session.spec.class_name} — {session.spec.exam_name}"
+    classes = " / ".join(session.class_names())  # several when periods are combined
+    prefix = f"{classes} — " if classes else ""
+    return f"{what}\n{prefix}{session.spec.exam_name}"
 
 
 def score_distribution_png(session: GradingSession) -> bytes:

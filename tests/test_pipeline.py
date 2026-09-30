@@ -104,7 +104,8 @@ def test_full_batch(exam):
     levels = sorted(m["level"] for m in summary["messages"])
     assert levels == ["error", "info"]  # blank page error, key sheet skipped
 
-    for idx, student in session.students.items():
+    for student in session.students.values():
+        idx = student.roster_index
         assert student.name == NAMES[idx - 1]
         assert student.pages_seen == {1, 2}
         expected = student_answers[idx]
@@ -113,13 +114,14 @@ def test_full_batch(exam):
                 continue
             assert student.answers[q] == frozenset(expected[q]), (student.name, q)
 
-    assert session.score(session.students[1]) == 20
+    by_roster = {s.roster_index: s for s in session.students.values()}
+    assert session.score(by_roster[1]) == 20
 
     # The smudged question for student 2 is flagged; resolving it fixes the answer.
-    s2 = session.students[2]
+    s2 = by_roster[2]
     assert 3 in s2.flags and s2.flags[3].reason in ("unclear", "multiple")
     assert s2.flags[3].snippet_png.startswith(b"\x89PNG")
-    session.resolve(2, 3, "".join("ABCD"[c] for c in student_answers[2][3]))
+    session.resolve(s2.id, 3, "".join("ABCD"[c] for c in student_answers[2][3]))
     assert s2.answers[3] == frozenset(student_answers[2][3]) and not s2.open_flags
 
 

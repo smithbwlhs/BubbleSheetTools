@@ -211,7 +211,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .file-btn:hover { border-color: var(--ink); }
 .file-btn.solid { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .file-btn.solid:hover { background: var(--accent); border-color: var(--accent); }
+.file-btn:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
 .file-btn input, .drop-zone input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.big-file { padding: 14px 24px; font-size: 1.02rem; }
+.start-note { max-width: 62ch; margin-top: 18px; }
 
 .submit-row { border-top: 1px solid var(--rule); padding: 32px 0 8px; }
 .submit-row .alert { margin-top: 0; }

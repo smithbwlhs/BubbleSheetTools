@@ -99,7 +99,8 @@ def test_grading_flow():
                        json={"student_index": 1, "number": 1, "score": 4}).status_code == 200
 
     csv = client.get("/api/grade/export/results.csv").content.decode("utf-8-sig")
-    assert "Ada Lovelace,10,10,100.0,4.0,14.0" in csv
+    ada = next(line for line in csv.splitlines() if line.startswith("Ada Lovelace,Chem,"))
+    assert ",10,10,100.0,4.0,14.0," in ada
     for name in ("item_analysis.csv", "score_distribution.png", "most_missed.png",
                  "choice_distribution.png", "all_results.zip"):
         r = client.get(f"/api/grade/export/{name}")
@@ -129,3 +130,20 @@ def test_signup_requires_adult_confirmation():
 def test_change_password_needs_login_cookie():
     r = client.post("/api/auth/password", json={"password": "longenough"})
     assert r.status_code == 401 and "sign in again" in r.json()["detail"]
+
+
+def test_import_results_csv():
+    old = ("Student,Class,Sheet ID,MC correct,Needs review,Notes,Q1,Q2\n"
+           "EXAM INFO,exam=Quiz 1,questions=2,choices=4,written=,scoring=all\n"
+           "ANSWER KEY,,,2,,,A,C\n"
+           "Ada Lovelace,Chem,0a1b2c3d-01,2,,,A,C\n")
+    client.post("/api/grade/start")
+    r = client.post("/api/grade/import", files={"file": ("results.csv", old.encode(), "text/csv")})
+    assert r.status_code == 200, r.text
+    state = r.json()["state"]
+    assert state["done"] and state["students"][0]["score"] == 2
+    assert state["imported_files"] == ["results.csv"]
+    r = client.post("/api/grade/import", files={"file": ("scan.pdf", b"%PDF-", "application/pdf")})
+    assert r.status_code == 400 and "not a CSV" in r.json()["detail"]
+    assert client.get("/api/grade/export/choice_distribution.png").status_code == 200
+    client.post("/api/grade/clear")
