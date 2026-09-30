@@ -1,5 +1,5 @@
-# Replace with your domain (its DNS A record must point at the droplet).
-bubblesheets.example.com {
+# Domain for the live site (its DNS A record must point at the droplet).
+bubblereader.wlhscomputerscience.com {
 	encode gzip
 	request_body {
 		max_size 45MB
