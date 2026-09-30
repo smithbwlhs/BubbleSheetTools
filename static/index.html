@@ -49,6 +49,15 @@
               <span class="hint">1 to 100</span></label>
             <label>Answer choices per question
               <select id="num-choices"></select></label>
+            <label>Exam versions
+              <select id="num-versions">
+                <option value="1" selected>1 (everyone takes the same test)</option>
+                <option value="2">2 versions</option>
+                <option value="3">3 versions</option>
+                <option value="4">4 versions</option>
+              </select>
+              <span class="hint">With 2 or more, students bubble their version number, and you
+                get an answer key sheet for each version.</span></label>
           </div>
           <div class="subsection">
             <label class="inline">Written response boxes
@@ -168,10 +177,24 @@
             or a CSV with one row per question, like <code>1,B</code> (or <code>2,AC</code> when
             more than one answer is correct).</p>
           <div class="row">
+            <label class="inline">Versions on this exam
+              <select id="grade-versions">
+                <option value="1">1</option><option value="2">2</option>
+                <option value="3">3</option><option value="4">4</option>
+              </select></label>
+            <span id="versions-hint" class="hint"></span>
+          </div>
+          <ul id="key-list" class="key-list" hidden></ul>
+          <div class="row">
             <label class="file-btn solid">Choose answer key
               <input id="key-file" type="file" accept=".csv,.pdf,.jpg,.jpeg,.png,.heic,.heif"></label>
+            <label id="key-version-box" class="inline" hidden>CSV key is for
+              <select id="key-version"></select></label>
             <span id="key-status" class="hint"></span>
           </div>
+          <p id="key-version-hint" class="hint" hidden>Scanned key sheets know their own version,
+            and you can scan them all into one PDF. For a CSV key, pick its version first, or
+            upload one CSV with <code>Question, Version 1, Version 2, &hellip;</code> columns.</p>
           <div class="subsection">
             <p class="hint">Or continue from earlier results: upload one or more
               <code>results.csv</code> files downloaded from this site. They must share the same
@@ -190,7 +213,7 @@
           <h2>Student sheets</h2>
         </div>
         <div class="step-body">
-          <p id="upload-locked" class="hint locked">Locked until an answer key is loaded.</p>
+          <p id="upload-locked" class="hint locked">Locked until every version has an answer key.</p>
           <div id="upload-area" hidden>
             <p class="hint">Scans or photos (PDF, JPG, PNG or HEIC), in one batch or a few at a time.
               Pages can be in any order, and upside down is fine.</p>
@@ -236,19 +259,8 @@
             <div class="table-wrap"><table id="results-table"></table></div>
 
             <h3>Downloads</h3>
-            <div class="downloads">
-              <a class="button primary" data-export="results.csv">Results CSV</a>
-              <a class="button ghost" data-export="item_analysis.csv">Question analysis CSV</a>
-              <a class="button ghost" data-export="score_distribution.png">Score distribution</a>
-              <a class="button ghost" data-export="most_missed.png">Most missed</a>
-              <a class="button ghost" data-export="choice_distribution.png">Choice distribution</a>
-              <a class="button ghost" data-export="all_results.zip">Everything (ZIP)</a>
-            </div>
-            <div class="charts">
-              <img data-chart="score_distribution.png" alt="Histogram of student scores">
-              <img data-chart="most_missed.png" alt="Questions ranked by number of students who missed them">
-              <img data-chart="choice_distribution.png" alt="Stacked bars showing which answer choices students picked for each question">
-            </div>
+            <div id="downloads" class="downloads"></div>
+            <div id="charts" class="charts"></div>
           </div>
         </section>
       </div>

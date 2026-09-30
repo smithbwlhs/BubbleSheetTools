@@ -30,7 +30,7 @@ import logging
 import re
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -105,6 +105,7 @@ class SheetsIn(BaseModel):
     num_questions: int = 0
     num_choices: int = 4
     written_heights: list[float] = Field(default_factory=list, max_length=50)
+    num_versions: int = 1
     names: list[str] = Field(default_factory=list, max_length=1000)
 
 
@@ -126,7 +127,8 @@ def make_sheets(body: SheetsIn):
         names = parse_pasted("\n".join(names))  # same cleaning/limits as the roster step
         spec = ExamSpec(class_name=body.class_name.strip(), exam_name=body.exam_name.strip(),
                         num_questions=body.num_questions, num_choices=body.num_choices,
-                        written_heights=tuple(round(h, 2) for h in body.written_heights))
+                        written_heights=tuple(round(h, 2) for h in body.written_heights),
+                        num_versions=body.num_versions)
         pdf = generate_sheets_pdf(spec, names)
     except (LayoutError, RosterError, ValueError) as exc:
         raise _bad(str(exc))
@@ -244,41 +246,56 @@ def _session(user: dict = Depends(auth.require_user)) -> GradingSession:
 
 def _state(session: GradingSession) -> dict:
     """Everything the grading screen needs, as JSON."""
-    spec, key = session.spec, session.key
+    spec = session.spec
     students, flags = [], []
-    total_q = len(key.answers) if key else 0
+    total_q = session.num_questions
     for s in session.ordered_students():
-        score = session.score(s) if (key and s.answers is not None) else None
+        score = session.score(s)
         students.append({
             "index": s.id, "name": s.name, "class_name": s.class_name, "sheet_id": s.sheet_id,
-            "score": score, "possible": total_q,
+            "version": s.version, "score": score, "possible": total_q,
             "percent": round(100 * score / total_q, 1) if score is not None and total_q else None,
             "bubble_page_read": s.answers is not None, "pages_seen": sorted(s.pages_seen),
             "open_flags": len(s.open_flags), "notes": s.notes,
             "written": [{"number": n, "score": v} for n, v in sorted(s.written_scores.items())],
         })
         for q, f in sorted(s.flags.items()):
+            if q == 0:  # the version row: detected / answer are version numbers
+                detected = "".join(str(c + 1) for c in sorted(f.detected))
+                answer = str(s.version) if s.version else ""
+                multi = False
+            else:
+                detected, answer = letters(f.detected), letters(s.answers.get(q, frozenset()))
+                key = session.key_for(s.version)
+                keys = [key] if key else list(session.keys.values())
+                multi = all(len(k.answers.get(q, ())) > 1 for k in keys)
             flags.append({
                 "student_index": s.id, "student": s.name, "question": q, "reason": f.reason,
-                "description": f.describe(), "detected": letters(f.detected),
-                "answer": letters(s.answers.get(q, frozenset())), "resolved": f.resolved,
-                "multi_correct": len(key.answers.get(q, ())) > 1,
-                "has_image": bool(f.snippet_png),
+                "description": f.describe(), "detected": detected, "answer": answer,
+                "resolved": f.resolved, "multi_correct": multi, "has_image": bool(f.snippet_png),
             })
     return {
-        "key": None if key is None else {
-            "source": session.key_source, "num_questions": key.num_questions,
-            "multi_answer_questions": [q for q, a in key.answers.items() if len(a) > 1],
+        "num_versions": session.num_versions,
+        "keys": [{"version": v, "source": session.key_sources.get(v),
+                  "loaded": v in session.keys} for v in session.versions],
+        "ready": session.ready,
+        "key": None if not session.keys else {
+            "num_questions": total_q,
+            "multi_answer_questions": sorted({q for k in session.keys.values()
+                                              for q, a in k.answers.items() if len(a) > 1}),
         },
         "exam": None if spec is None else {
             "class_name": " / ".join(session.class_names()), "exam_name": spec.exam_name,
             "num_questions": spec.num_questions, "num_choices": spec.num_choices,
             "num_written": len(spec.written_heights),
         },
+        "key_sheet_scanned": bool(session.exam_ids and session.keys and not session.imported_files
+                                  and any(k.exam_id for k in session.keys.values())),
         "students": students,
         "flags": flags,
         "messages": [m.__dict__ for m in session.messages],
         "imported_files": session.imported_files,
+        "exports": list(export.export_files(session)) + ["all_results.zip"] if session.keys else [],
         "multi_mode": session.multi_mode,
         "done": session.done,
         "expires_minutes": settings.session_ttl_minutes,
@@ -297,9 +314,12 @@ def grade_state(user: dict = Depends(auth.require_user)):
 
 
 @app.post("/api/grade/key")
-def grade_key(file: UploadFile = File(...), session: GradingSession = Depends(_session)):
+def grade_key(file: UploadFile = File(...), version: int | None = Form(None),
+              session: GradingSession = Depends(_session)):
+    """Answer key upload. `version` says which version a plain CSV key is for;
+    scanned key sheets and CSVs with Version columns identify versions themselves."""
     try:
-        session.set_key_from_upload(file.filename or "key", _read_upload(file))
+        session.set_key_from_upload(file.filename or "key", _read_upload(file), version)
     except AnswerKeyError as exc:
         raise _bad(str(exc))
     return _state(session)
@@ -320,8 +340,6 @@ def grade_import(file: UploadFile = File(...), session: GradingSession = Depends
 
 @app.post("/api/grade/upload")
 def grade_upload(file: UploadFile = File(...), session: GradingSession = Depends(_session)):
-    if session.key is None:
-        raise _bad("Upload the answer key before uploading student sheets.")
     data = _read_upload(file)
     try:
         summary = session.process_upload(file.filename or "upload", data,
@@ -334,7 +352,7 @@ def grade_upload(file: UploadFile = File(...), session: GradingSession = Depends
 
 @app.post("/api/grade/done")
 def grade_done(session: GradingSession = Depends(_session)):
-    if session.key is None:
+    if not session.keys:
         raise _bad("Upload the answer key first.")
     if not any(s.answers is not None for s in session.students.values()):
         raise _bad("No student sheets have been graded yet. Upload at least one sheet.")
@@ -345,7 +363,7 @@ def grade_done(session: GradingSession = Depends(_session)):
 class ResolveIn(BaseModel):
     student_index: int
     question: int
-    answer: str = Field("", max_length=20)  # letters, e.g. "B" or "AC"; "" = blank
+    answer: str = Field("", max_length=20)  # letters ("B", "AC", "" = blank); version number for question 0
 
 
 @app.post("/api/grade/resolve")
@@ -373,14 +391,18 @@ def grade_written(body: WrittenIn, session: GradingSession = Depends(_session)):
 
 
 class SettingsIn(BaseModel):
-    multi_mode: str
+    multi_mode: str | None = None
+    num_versions: int | None = None
 
 
 @app.post("/api/grade/settings")
 def grade_settings(body: SettingsIn, session: GradingSession = Depends(_session)):
     try:
-        session.set_multi_mode(body.multi_mode)
-    except ValueError as exc:
+        if body.multi_mode is not None:
+            session.set_multi_mode(body.multi_mode)
+        if body.num_versions is not None:
+            session.set_num_versions(body.num_versions)
+    except (ValueError, AnswerKeyError) as exc:
         raise _bad(str(exc))
     return _state(session)
 
@@ -395,23 +417,15 @@ def grade_snippet(student_index: int, question: int,
     return Response(flag.snippet_png, media_type="image/png")
 
 
-_EXPORTS = {
-    "results.csv": ("text/csv", export.results_csv),
-    "item_analysis.csv": ("text/csv", export.item_analysis_csv),
-    "score_distribution.png": ("image/png", export.score_distribution_png),
-    "most_missed.png": ("image/png", export.most_missed_png),
-    "choice_distribution.png": ("image/png", export.choice_distribution_png),
-    "all_results.zip": ("application/zip", export.all_exports_zip),
-}
-
-
 @app.get("/api/grade/export/{name}")
 def grade_export(name: str, inline: bool = False, session: GradingSession = Depends(_session)):
-    if name not in _EXPORTS:
-        raise _bad("Unknown export.", 404)
-    if session.key is None or not any(s.answers is not None for s in session.students.values()):
+    if not session.keys or not any(s.answers is not None for s in session.students.values()):
         raise _bad("There are no graded sheets to export yet.")
-    media_type, build = _EXPORTS[name]
+    files = {**export.export_files(session),
+             "all_results.zip": ("application/zip", export.all_exports_zip)}
+    if name not in files:
+        raise _bad("Unknown export.", 404)
+    media_type, build = files[name]
     with session.lock:
         data = build(session)
     prefix = f"{_safe_filename(session.spec.class_name)}_{_safe_filename(session.spec.exam_name)}"

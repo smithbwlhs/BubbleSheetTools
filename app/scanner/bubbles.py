@@ -82,12 +82,16 @@ def _best_row_offset(img: np.ndarray, bubbles: list[Bubble]) -> tuple[int, int]:
 
 
 def read_bubbles(canon: np.ndarray, layout: PageLayout) -> dict[int, QuestionRead]:
-    """Read every question on the page. Returns {question number: QuestionRead}."""
+    """Read every question on the page. Returns {question number: QuestionRead}.
+
+    On multi-version exams the version row is included as question 0 (its
+    "choices" are versions 1..n), so it is judged with the same thresholds.
+    """
     blur = cv2.GaussianBlur(canon, (3, 3), 0)
     norm = normalize_background(blur, kernel=int(40 * SCALE))
 
     rows: dict[int, list[Bubble]] = {}
-    for b in layout.bubbles:
+    for b in layout.bubbles + layout.version_bubbles:
         rows.setdefault(b.question, []).append(b)
 
     raw: dict[int, list[float]] = {}
@@ -126,8 +130,12 @@ def read_bubbles(canon: np.ndarray, layout: PageLayout) -> dict[int, QuestionRea
 
 def row_snippet_png(canon: np.ndarray, layout: PageLayout, question: int) -> bytes:
     """Crop one question's row from the page as a PNG, for manual review."""
-    bubbles = [b for b in layout.bubbles if b.question == question]
-    label = next(lbl for lbl in layout.labels if lbl.question == question)
+    if question == 0:  # the version row
+        bubbles, label = layout.version_bubbles, layout.version_label
+        label = type(label)(0, label.x - 30, label.y)  # include the word "Version"
+    else:
+        bubbles = [b for b in layout.bubbles if b.question == question]
+        label = next(lbl for lbl in layout.labels if lbl.question == question)
     r = max(b.r for b in bubbles)
     x0 = (label.x - 32) * SCALE
     x1 = (max(b.x for b in bubbles) + r * 2.5) * SCALE

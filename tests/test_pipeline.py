@@ -58,7 +58,7 @@ def make_session(exam) -> GradingSession:
 def test_key_sheet_is_read(exam):
     spec, _, key, _ = exam
     session = make_session(exam)
-    assert session.key.answers == {q: frozenset(v) for q, v in key.items()}
+    assert session.keys[1].answers == {q: frozenset(v) for q, v in key.items()}
     assert session.spec.exam_id == spec.exam_id
 
 
@@ -69,7 +69,7 @@ def test_uploads_blocked_without_key():
 
 def test_student_sheet_rejected_as_key(exam):
     spec, pages, key, rng = exam
-    with pytest.raises(AnswerKeyError, match="not the ANSWER KEY"):
+    with pytest.raises(AnswerKeyError, match="not an ANSWER KEY"):
         GradingSession(user_id="t").set_key_from_upload("k.png", png(pages[1]))
 
 
@@ -129,7 +129,7 @@ def test_multi_answer_scoring_modes(exam):
     session = make_session(exam)
     session.spec = exam[0]
     from app.grading import StudentResult
-    s = StudentResult(1, "x", answers={q: v for q, v in session.key.answers.items()})
+    s = StudentResult(1, "x", answers={q: v for q, v in session.keys[1].answers.items()})
     s.answers[5] = frozenset({0})  # only one of the two correct answers
     assert session.score(s) == 19
     session.set_multi_mode("any")

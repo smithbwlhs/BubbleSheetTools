@@ -2,7 +2,8 @@
 Generate printable bubble sheets as a single PDF.
 
 The PDF starts with an ANSWER KEY sheet (the teacher fills it in and scans it
-as the key), followed by one sheet per student. Every page carries:
+as the key; one per version on multi-version exams), followed by one sheet per
+student. Every page carries:
   * four solid corner squares used by the scanner to straighten the page,
   * a QR code identifying the exam, the student and the page number,
   * the class, exam and student name printed in plain text.
@@ -72,7 +73,8 @@ def _draw_frame(c: canvas.Canvas, spec: ExamSpec, who: SheetIdentity,
 
     if who.kind == "k":
         c.setFont("Helvetica-Bold", 20)
-        c.drawString(CONTENT_LEFT, _flip(92), "ANSWER KEY")
+        label = f"ANSWER KEY \u2014 Version {who.version}" if who.version else "ANSWER KEY"
+        c.drawString(CONTENT_LEFT, _flip(92), label)
         c.setFont("Helvetica", 9)
         c.drawString(CONTENT_LEFT, _flip(110),
                      "Fill in every correct answer. Bubble more than one if several are correct.")
@@ -93,8 +95,36 @@ def _draw_frame(c: canvas.Canvas, spec: ExamSpec, who: SheetIdentity,
         c.drawRightString(CONTENT_RIGHT, _flip(134), f"Page {page.page} of {total_pages}")
 
 
-def _draw_body(c: canvas.Canvas, page: PageLayout) -> None:
+def _draw_version_row(c: canvas.Canvas, page: PageLayout, filled: int = 0) -> None:
+    """The "Version 1 2 3 4" row. On key sheets its own version is pre-filled."""
+    if not page.version_bubbles:
+        return
+    lbl = page.version_label
+    c.setFillGray(0)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawRightString(lbl.x, _flip(lbl.y) - 4, "Version")
+    c.setLineWidth(1)
+    for b in page.version_bubbles:
+        c.setStrokeGray(BUBBLE_OUTLINE_GRAY)
+        if b.choice + 1 == filled:
+            c.setFillGray(0)
+            c.circle(b.x, _flip(b.y), b.r, stroke=1, fill=1)
+            continue
+        c.circle(b.x, _flip(b.y), b.r, stroke=1, fill=0)
+        c.setFillGray(BUBBLE_LETTER_GRAY)
+        c.setFont("Helvetica", b.r * 1.2)
+        c.drawCentredString(b.x, _flip(b.y) - b.r * 0.42, str(b.choice + 1))
+    last = page.version_bubbles[-1]
+    c.setFillGray(0.35)
+    c.setFont("Helvetica", 8.5)
+    note = ("This sheet is the key for the filled-in version." if filled
+            else "Fill in the version number printed on your test.")
+    c.drawString(last.x + last.r + 14, _flip(lbl.y) - 3, note)
+
+
+def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0) -> None:
     """Bubbles, question numbers, column letters and written response boxes."""
+    _draw_version_row(c, page, version_filled)
     c.setFillGray(0)
     for h in page.headers:
         c.setFont("Helvetica-Bold", 8)
@@ -134,12 +164,17 @@ def generate_sheets_pdf(spec: ExamSpec, names: list[str]) -> bytes:
     c.setTitle(f"{spec.class_name} - {spec.exam_name} bubble sheets")
     c.setAuthor("BubbleSheetTools")
 
-    # Answer key: only the bubble page is needed.
-    key = SheetIdentity(kind="k", student_name="", student_index=0)
-    _draw_frame(c, spec, key, pages[0], 1)
-    _draw_body(c, PageLayout(page=1, bubbles=pages[0].bubbles, labels=pages[0].labels,
-                             headers=pages[0].headers))
-    c.showPage()
+    # Answer key sheet(s): only the bubble page is needed. Multi-version
+    # exams get one per version, with that version already filled in.
+    key_page = PageLayout(page=1, bubbles=pages[0].bubbles, labels=pages[0].labels,
+                          headers=pages[0].headers, version_bubbles=pages[0].version_bubbles,
+                          version_label=pages[0].version_label)
+    versions = range(1, spec.num_versions + 1) if spec.num_versions > 1 else [0]
+    for version in versions:
+        key = SheetIdentity(kind="k", student_name="", student_index=0, version=version)
+        _draw_frame(c, spec, key, key_page, 1)
+        _draw_body(c, key_page, version_filled=version)
+        c.showPage()
 
     for index, name in enumerate(names, start=1):
         who = SheetIdentity(kind="s", student_name=name, student_index=index)

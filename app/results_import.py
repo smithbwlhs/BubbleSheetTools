@@ -4,10 +4,11 @@ analysis later (lost ZIP, late students, or combining class periods).
 
 Expected layout (see export.results_csv):
 
-    Student, Class, Sheet ID, MC correct, ..., Written 1.., Total, Needs review, Notes, Q1..Qn
-    EXAM INFO, exam=Unit 4 Test, questions=20, choices=4, written=2.0;7.0, scoring=all, ids=...
-    ANSWER KEY, ..., B, AC, D, ...
-    Ada Lovelace, Bio P3, 3f9c01ab-01, ..., B, A?, D, ...
+    Student, Class, Version, Sheet ID, MC correct, ..., Written 1.., Total, Needs review, Notes, Q1..Qn
+    EXAM INFO, exam=Unit 4 Test, questions=20, choices=4, versions=2, written=2.0;7.0, ...
+    ANSWER KEY V1, ..., B, AC, D, ...      (just "ANSWER KEY" on single-version exams)
+    ANSWER KEY V2, ..., D, B, A, ...
+    Ada Lovelace, Bio P3, 1, 3f9c01ab-01, ..., B, A?, D, ...
 
 Rows are found by their first cell, not their position, so a file that was
 opened in Excel, sorted or trimmed still loads. Score columns are ignored and
@@ -23,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 
 from .answer_key import AnswerKeyError
-from .sheet_layout import CHOICE_LETTERS, MAX_CHOICES, MAX_QUESTIONS, MIN_CHOICES
+from .sheet_layout import CHOICE_LETTERS, MAX_CHOICES, MAX_QUESTIONS, MAX_VERSIONS, MIN_CHOICES
 
 MAX_ROWS = 2000
 
@@ -34,6 +35,7 @@ class ImportedStudent:
     class_name: str
     exam_id: str
     roster_index: int | None
+    version: int | None                         # None = still unknown ("?")
     answers: dict[int, frozenset[int]] | None  # None = bubble page never scanned
     uncertain: set[int]                         # answers marked "?" (still to check)
     written: dict[int, float | None]
@@ -46,7 +48,8 @@ class ImportedResults:
     num_choices: int
     written_heights: tuple[float, ...]
     multi_mode: str
-    key: dict[int, frozenset[int]]
+    keys: dict[int, dict[int, frozenset[int]]]  # version -> question -> correct choices
+    num_versions: int
     exam_ids: set[str]
     students: list[ImportedStudent] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -121,25 +124,42 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
                     k, v = c.split("=", 1)
                     info[k.strip().lower()] = v.strip()
 
-    # ---- ANSWER KEY ----
-    key_row = next((r for r in body if r[0].strip().upper() == "ANSWER KEY"), None)
-    if key_row is None:
+    # ---- ANSWER KEY row(s): "ANSWER KEY", or "ANSWER KEY V1", "ANSWER KEY V2", ... ----
+    keys: dict[int, dict[int, frozenset[int]]] = {}
+    for r in body:
+        m = re.fullmatch(r"ANSWER KEY(?:\s*(?:V|VERSION)\s*(\d))?", r[0].strip().upper())
+        if not m:
+            continue
+        version = int(m.group(1) or 1)
+        if not 1 <= version <= MAX_VERSIONS or version in keys:
+            raise AnswerKeyError(f"{filename}: unexpected answer key row '{r[0].strip()}'.")
+        label = f"version {version} answer key" if m.group(1) else "answer key"
+        key = {}
+        for q, i in q_cols.items():
+            answer = _letters(cell(r, i), f"Answer key Q{q}")
+            if not answer:
+                raise AnswerKeyError(f"{filename}: the {label} has no answer for Q{q}.")
+            key[q] = answer
+        keys[version] = key
+    if not keys:
         raise AnswerKeyError(f"{filename} is missing its ANSWER KEY row.")
-    key = {}
-    for q, i in q_cols.items():
-        answer = _letters(cell(key_row, i), f"Answer key Q{q}")
-        if not answer:
-            raise AnswerKeyError(f"{filename}: the answer key has no answer for Q{q}.")
-        key[q] = answer
+    try:
+        num_versions = int(info.get("versions", 0)) or max(keys)
+    except ValueError:
+        num_versions = max(keys)
+    missing = [v for v in range(1, num_versions + 1) if v not in keys]
+    if missing or not 1 <= num_versions <= MAX_VERSIONS:
+        raise AnswerKeyError(f"{filename} is missing the answer key for version "
+                             f"{', '.join(map(str, missing))}.")
 
     # ---- students ----
     warnings: list[str] = []
     students: list[ImportedStudent] = []
-    class_i, sheet_i = col.get("class"), col.get("sheet id")
+    class_i, sheet_i, version_i = col.get("class"), col.get("sheet id"), col.get("version")
     review_i = col.get("needs review")
     for r in body:
         name = r[0].strip()
-        if name.upper() in ("EXAM INFO", "ANSWER KEY") or not name:
+        if name.upper() == "EXAM INFO" or name.upper().startswith("ANSWER KEY") or not name:
             continue
         where = f"{filename}, row for {name}"
         cells = {q: cell(r, i) for q, i in q_cols.items()}
@@ -153,16 +173,20 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
                     value = value[:-1]
                 answers[q] = _letters(value, f"{where}, Q{q}")
         exam_id, roster = _parse_sheet_id(cell(r, sheet_i))
+        version: int | None = 1
+        if num_versions > 1:
+            v = cell(r, version_i).upper().removeprefix("V")
+            version = int(v) if v.isdigit() and int(v) in keys else None
         students.append(ImportedStudent(
             name=name[:60], class_name=cell(r, class_i)[:60], exam_id=exam_id,
-            roster_index=roster, answers=answers, uncertain=uncertain,
+            roster_index=roster, version=version, answers=answers, uncertain=uncertain,
             written={n: _number(cell(r, i), f"{where}, Written {n}") for n, i in w_cols.items()},
         ))
     if not students:
         raise AnswerKeyError(f"{filename} has no student rows.")
 
     # ---- exam details (from EXAM INFO, or inferred for older files) ----
-    used = [c for a in key.values() for c in a]
+    used = [c for key in keys.values() for a in key.values() for c in a]
     used += [c for s in students if s.answers for a in s.answers.values() for c in a]
     try:
         num_choices = int(info["choices"])
@@ -192,5 +216,6 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
     return ImportedResults(
         exam_name=exam_name[:60], num_questions=num_q, num_choices=num_choices,
         written_heights=heights, multi_mode=mode if mode in ("all", "any") else "all",
-        key=key, exam_ids=exam_ids, students=students, warnings=warnings,
+        keys=keys, num_versions=num_versions, exam_ids=exam_ids, students=students,
+        warnings=warnings,
     )

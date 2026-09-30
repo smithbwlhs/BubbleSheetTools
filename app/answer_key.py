@@ -88,3 +88,42 @@ def parse_key_csv(text: str) -> AnswerKey:
     if missing:
         raise AnswerKeyError(f"The answer key is missing question(s): {', '.join(map(str, missing[:10]))}.")
     return AnswerKey(answers=answers)
+
+
+def parse_versioned_key_csv(text: str) -> dict[int, AnswerKey] | None:
+    """Parse a multi-version key: a header row "Question, Version 1, Version 2, ..."
+    then one row per question with each version's answer in its column.
+
+    Returns {version: AnswerKey}, or None if the file has no version columns
+    (it is then an ordinary single-version key).
+    """
+    text = (text or "").lstrip("\ufeff").strip()
+    rows = [r for r in csv.reader(io.StringIO(text)) if any(c.strip() for c in r)]
+    if not rows:
+        return None
+    header = [c.strip().lower() for c in rows[0]]
+    version_cols = {}
+    for i, h in enumerate(header):
+        m = re.fullmatch(r"(?:version|ver|v)\s*(\d)", h)
+        if m:
+            version_cols[int(m.group(1))] = i
+    if not version_cols:
+        return None
+    if sorted(version_cols) != list(range(1, len(version_cols) + 1)) or len(version_cols) > 4:
+        raise AnswerKeyError("Version columns should be Version 1, Version 2, ... (up to 4).")
+
+    keys = {}
+    for version, col in version_cols.items():
+        lines = []
+        for row in rows[1:]:
+            q = row[0].strip() if row else ""
+            a = row[col].strip() if col < len(row) else ""
+            lines.append(f'{q},"{a}"')
+        try:
+            keys[version] = parse_key_csv("\n".join(lines))
+        except AnswerKeyError as exc:
+            raise AnswerKeyError(f"Version {version}: {exc}") from None
+    counts = {k.num_questions for k in keys.values()}
+    if len(counts) > 1:
+        raise AnswerKeyError("Every version must have the same number of questions.")
+    return keys

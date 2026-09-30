@@ -18,7 +18,7 @@ KEY = {1: frozenset({0}), 2: frozenset({1}), 3: frozenset({0, 2}), 4: frozenset(
 def graded_session(spec: ExamSpec, students: list[tuple[str, dict, float | None]]) -> GradingSession:
     """A session as if these students' sheets had been scanned."""
     session = GradingSession(user_id="t")
-    session.key = AnswerKey(answers=dict(KEY), num_choices=spec.num_choices, exam_id=spec.exam_id)
+    session.keys = {1: AnswerKey(answers=dict(KEY), num_choices=spec.num_choices, exam_id=spec.exam_id)}
     session.spec = spec
     session.exam_ids = {spec.exam_id}
     for i, (name, answers, written) in enumerate(students, start=1):
@@ -49,7 +49,7 @@ def test_round_trip_restores_everything():
     summary = restored.import_results("results.csv", data)
     assert summary == {"file": "results.csv", "added": 2, "replaced": 0, "warnings": []}
     assert restored.done and restored.multi_mode == "any"
-    assert restored.key.answers == KEY
+    assert restored.keys[1].answers == KEY
     assert restored.spec.num_choices == 5 and restored.spec.written_heights == (2.5,)
     assert restored.exam_ids == original.exam_ids
 
@@ -100,7 +100,7 @@ def test_same_student_again_is_replaced_and_noted():
 def test_different_answer_key_is_rejected():
     a = graded_session(spec_for("Bio P3"), [("Ada", PERFECT, None)])
     b = graded_session(spec_for("Bio P5"), [("Grace", PERFECT, None)])
-    b.key.answers[1] = frozenset({1})
+    b.keys[1].answers[1] = frozenset({1})
     session = GradingSession(user_id="t")
     session.import_results("a.csv", results_csv(a))
     with pytest.raises(AnswerKeyError, match="different answer key"):

@@ -26,16 +26,19 @@ def render_pdf_pages(pdf: bytes, dpi: int = 200) -> list[np.ndarray]:
 
 def fill_bubbles(page_img: np.ndarray, spec: ExamSpec, answers: dict[int, set[int]],
                  rng: np.random.Generator, darkness: int = 60, light: dict | None = None,
-                 coverage: float = 0.95) -> np.ndarray:
+                 coverage: float = 0.95, version: int | set[int] = 0) -> np.ndarray:
     """Pencil in bubbles on a 200 dpi rendering of page 1.
 
     answers: {question: {choice, ...}}. light: {(q, choice): gray level} for
-    faint marks / smudges drawn instead of a full mark.
+    faint marks / smudges drawn instead of a full mark (q=0 is the version row).
+    version: the version number(s) to bubble in on multi-version exams.
     """
     img = page_img.copy()
     s = page_img.shape[1] / 612.0  # pixels per point
     layout = build_layout(spec)[0]
-    for b in layout.bubbles:
+    versions = {version} if isinstance(version, int) else set(version)
+    answers = {**answers, 0: {v - 1 for v in versions if v}}
+    for b in layout.bubbles + layout.version_bubbles:
         level = None
         if b.choice in answers.get(b.question, set()):
             level = darkness

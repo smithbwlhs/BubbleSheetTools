@@ -14,6 +14,13 @@ scanned sheets, and export the results as CSV files and PNG charts.
   - `results.csv`: one row per student, with every answer
   - `item_analysis.csv`: % correct, # missed and choice counts per question
   - `score_distribution.png`, `most_missed.png`, `choice_distribution.png`
+- **Exam versions** (up to 4): with 2 or more, every sheet gets a "Version" bubble row
+  and the PDF starts with one answer key sheet per version. Each student is graded against
+  the key for the version they bubbled; a blank or double-marked version is flagged for
+  the teacher to pick. Keys can be scanned key sheets (one PDF can hold all of them), a
+  CSV per version, or one CSV with `Question, Version 1, Version 2, ...` columns. Question
+  analysis and the per-question charts are produced **per version**, so scrambled
+  questions or choices don't matter.
 - **Continue from a results CSV** (teacher account): re-upload a `results.csv` from
   earlier to regenerate the analysis (lost downloads), grade late students' sheets from the
   same print batch, or combine several periods that used the same answer key. A student

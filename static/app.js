@@ -198,13 +198,17 @@ async function createSheets(e) {
       num_questions: Number($("#num-questions").value),
       num_choices: Number($("#num-choices").value),
       written_heights: $$("[data-written]").map((i) => Number(i.value)),
+      num_versions: Number($("#num-versions").value),
       names: parsedNames,
     };
     const blob = await api("/api/sheets", { method: "POST", json: body, blob: true });
     const safe = (s) => s.replace(/[^A-Za-z0-9._-]+/g, "_");
     downloadBlob(blob, `${safe(body.class_name)}_${safe(body.exam_name)}_sheets.pdf`);
-    setAlert(errorBox, `Created ${parsedNames.length} student sheets plus the answer key sheet ` +
-      "(page 1). Print them all; fill in the answer key yourself.", "ok");
+    const keySheets = body.num_versions > 1
+      ? `${body.num_versions} answer key sheets (pages 1–${body.num_versions}, one per version)`
+      : "the answer key sheet (page 1)";
+    setAlert(errorBox, `Created ${parsedNames.length} student sheets plus ${keySheets}. ` +
+      "Print them all; fill in the answer key yourself.", "ok");
   } catch (err) {
     setAlert(errorBox, err.message, "error");
   } finally {
@@ -400,24 +404,17 @@ function renderGrade(state) {
 
   // Bubbles next to each step fill in as the step is completed.
   const graded = state.students.filter((s) => s.bubble_page_read).length;
-  $("#step-key").classList.toggle("done", Boolean(state.key));
+  $("#step-key").classList.toggle("done", state.ready);
   $("#step-upload").classList.toggle("done", graded > 0 && state.done);
   $("#step-review").classList.toggle("done", state.done && state.flags.every((f) => f.resolved));
   $("#step-results").classList.toggle("done", state.done);
 
-  // Step 1: key
-  $("#key-status").textContent = !state.key ? "No key loaded yet"
-    : state.imported_files.length
-      ? `From results: ${state.imported_files.join(", ")} · ${state.key.num_questions} questions`
-      : `Loaded from ${state.key.source} · ${state.key.num_questions} questions`;
-  // The key can't change once students are graded against it.
-  $("#key-file").disabled = state.students.length > 0;
-  $("#key-file").closest("label").title = state.students.length
-    ? "Start a new grading session to use a different answer key." : "";
+  // Step 1: key(s), one per exam version
+  renderKeys(state);
 
-  // Step 2: uploads, locked until there is a key
-  show($("#upload-locked"), !state.key);
-  show($("#upload-area"), Boolean(state.key));
+  // Step 2: uploads, locked until every version has a key
+  show($("#upload-locked"), !state.ready);
+  show($("#upload-area"), state.ready);
   renderPageMessages(state.messages);
 
   // Steps 3-4
@@ -426,6 +423,46 @@ function renderGrade(state) {
     renderFlags(state);
     renderResults(state);
   }
+}
+
+function renderKeys(state) {
+  const multi = state.num_versions > 1;
+  const locked = state.students.length > 0;
+  const versionsSelect = $("#grade-versions");
+  versionsSelect.value = String(state.num_versions);
+  // The number of versions comes from a scanned key sheet, or is fixed once grading starts.
+  versionsSelect.disabled = locked || state.key_sheet_scanned;
+  $("#versions-hint").textContent = state.key_sheet_scanned ? "(from the scanned key sheet)"
+    : locked ? "" : "Set this before uploading CSV keys.";
+
+  const list = $("#key-list");
+  list.replaceChildren(...state.keys.map((k) => el("li", { class: k.loaded ? "loaded" : "" },
+    el("span", { class: "kv" }, `Version ${k.version}`),
+    k.loaded ? el("span", {}, `✔ ${k.source}`) : el("span", { class: "missing" }, "missing"))));
+  show(list, multi);
+
+  // Which version a plain CSV key is for: default to the first one still missing.
+  const pick = $("#key-version");
+  const previous = pick.value;
+  pick.replaceChildren(...state.keys.map((k) =>
+    el("option", { value: k.version }, `Version ${k.version}${k.loaded ? " (replace)" : ""}`)));
+  const firstMissing = state.keys.find((k) => !k.loaded);
+  pick.value = firstMissing ? String(firstMissing.version)
+    : (state.keys.some((k) => String(k.version) === previous) ? previous : "1");
+  show($("#key-version-box"), multi && !locked);
+  show($("#key-version-hint"), multi && !locked);
+
+  const loaded = state.keys.filter((k) => k.loaded);
+  $("#key-status").textContent = !state.key ? "No key loaded yet"
+    : state.imported_files.length
+      ? `From results: ${state.imported_files.join(", ")} · ${state.key.num_questions} questions`
+      : multi
+        ? `${loaded.length} of ${state.num_versions} keys loaded · ${state.key.num_questions} questions`
+        : `Loaded from ${loaded[0].source} · ${state.key.num_questions} questions`;
+  // The keys can't change once students are graded against them.
+  $("#key-file").disabled = locked;
+  $("#key-file").closest("label").title = locked
+    ? "Start a new grading session to use a different answer key." : "";
 }
 
 function renderPageMessages(messages) {
@@ -491,6 +528,7 @@ function setupGrading() {
     $("#key-status").textContent = "Reading answer key…";
     const form = new FormData();
     form.append("file", file);
+    if (gradeState && gradeState.num_versions > 1) form.append("version", $("#key-version").value);
     try {
       renderGrade(await api("/api/grade/key", { method: "POST", form }));
     } catch (err) {
@@ -515,13 +553,15 @@ function setupGrading() {
     $("#step-review").scrollIntoView({ behavior: "smooth" });
   }));
 
+  $("#grade-versions").addEventListener("change", (e) => handleApiError(async () => {
+    setAlert($("#key-error"), "");
+    renderGrade(await api("/api/grade/settings", { method: "POST",
+      json: { num_versions: Number(e.target.value) } }));
+  }));
+
   $("#multi-mode").addEventListener("change", (e) => handleApiError(async () => {
     renderGrade(await api("/api/grade/settings", { method: "POST", json: { multi_mode: e.target.value } }));
   }));
-
-  $$("[data-export]").forEach((a) => {
-    a.href = `/api/grade/export/${a.dataset.export}`;
-  });
 }
 
 /** Load results CSVs one at a time. Returns true if at least one loaded. */
@@ -598,43 +638,54 @@ function renderFlags(state) {
   }
   $("#review-summary").textContent = summary;
 
-  const k = state.exam.num_choices;
   for (const f of state.flags) {
-    let selected = new Set(f.answer.split(""));
-    const buttons = [];
-    for (let c = 0; c < k; c++) {
-      const letter = LETTERS[c];
-      const b = el("button", { type: "button", class: selected.has(letter) ? "on" : "",
-        "aria-pressed": selected.has(letter) ? "true" : "false" }, letter);
+    // Question 0 is the version row: pick exactly one version number.
+    // Otherwise pick any letters (none = blank answer).
+    const isVersion = f.question === 0;
+    const options = isVersion
+      ? Array.from({ length: state.num_versions }, (_, i) => String(i + 1))
+      : LETTERS.slice(0, state.exam.num_choices).split("");
+    const selected = new Set(f.answer.split("").filter(Boolean));
+    const buttons = options.map((opt) => {
+      const b = el("button", { type: "button", class: selected.has(opt) ? "on" : "",
+        "aria-pressed": selected.has(opt) ? "true" : "false" }, opt);
       b.addEventListener("click", () => {
-        if (selected.has(letter)) selected.delete(letter); else selected.add(letter);
-        b.classList.toggle("on");
-        b.setAttribute("aria-pressed", String(selected.has(letter)));
+        if (isVersion) selected.clear();
+        if (selected.has(opt)) selected.delete(opt); else selected.add(opt);
+        buttons.forEach((other, i) => {
+          other.classList.toggle("on", selected.has(options[i]));
+          other.setAttribute("aria-pressed", String(selected.has(options[i])));
+        });
       });
-      buttons.push(b);
-    }
+      return b;
+    });
     const confirmBtn = el("button", { type: "button", class: "primary" },
       f.resolved ? "Update" : "Confirm");
     confirmBtn.addEventListener("click", () => handleApiError(async () => {
-      const answer = LETTERS.slice(0, k).split("").filter((l) => selected.has(l)).join("");
+      const answer = options.filter((o) => selected.has(o)).join("");
+      if (isVersion && !answer) throw new Error("Pick the student's version first.");
       renderGrade(await api("/api/grade/resolve", { method: "POST",
         json: { student_index: f.student_index, question: f.question, answer } }));
     }));
+    const read = f.detected ? `Scanner read: ${isVersion ? f.detected.split("").join(" and ") : f.detected}.`
+      : "Scanner read: blank.";
     list.append(el("div", { class: "flag" + (f.resolved ? " resolved" : "") },
       el("div", {},
         el("div", {}, el("span", { class: "flag-title" }, f.student),
-          el("span", { class: "flag-q" }, `Q${f.question}`), " ",
+          el("span", { class: "flag-q" }, isVersion ? "Version" : `Q${f.question}`), " ",
           f.resolved ? el("span", { class: "tag checked" }, "checked")
                      : el("span", { class: "tag" }, "check")),
-        el("div", { class: "flag-note" }, f.description +
-          (f.detected ? ` Scanner read: ${f.detected}.` : " Scanner read: blank.") +
+        el("div", { class: "flag-note" }, `${f.description} ${read}` +
           (f.multi_correct ? " (This question has more than one correct answer.)" : "")),
         f.has_image ? el("img", { src: `/api/grade/snippet/${f.student_index}/${f.question}.png`,
-                    alt: `Scanned row for question ${f.question}`, loading: "lazy" }) : null),
+          alt: isVersion ? "Scanned version row" : `Scanned row for question ${f.question}`,
+          loading: "lazy" }) : null),
       el("div", {},
-        el("div", { class: "choices", role: "group", "aria-label": "Student's answer" }, buttons),
+        el("div", { class: "choices" + (isVersion ? " versions" : ""), role: "group",
+                    "aria-label": isVersion ? "Student's version" : "Student's answer" }, buttons),
         el("div", { class: "row" }, confirmBtn,
-          el("span", { class: "hint" }, "Leave all empty for a blank answer"))),
+          el("span", { class: "hint" }, isVersion ? "Score appears once the version is set"
+                                                  : "Leave all empty for a blank answer"))),
     ));
   }
 }
@@ -649,8 +700,9 @@ function renderResults(state) {
   const table = $("#results-table");
   // Show a Class column only when results from several classes are combined.
   const showClass = new Set(state.students.map((s) => s.class_name)).size > 1;
+  const showVersion = state.num_versions > 1;
   const head = el("tr", {}, el("th", {}, "Student"), showClass ? el("th", {}, "Class") : null,
-    el("th", {}, "Score"), el("th", {}, "%"),
+    showVersion ? el("th", {}, "Version") : null, el("th", {}, "Score"), el("th", {}, "%"),
     Array.from({ length: nWritten }, (_, i) => el("th", {}, `Written ${i + 1}`)),
     el("th", {}, "Notes"));
   const rows = state.students.map((s) => {
@@ -661,6 +713,7 @@ function renderResults(state) {
     return el("tr", {},
       el("td", {}, s.name),
       showClass ? el("td", {}, s.class_name) : null,
+      showVersion ? el("td", {}, s.version ?? "?") : null,
       el("td", {}, s.score === null ? "—" : `${s.score} / ${s.possible}`),
       el("td", {}, s.percent === null ? "—" : `${s.percent}%`),
       s.written.map((w) => el("td", {}, writtenInput(s, w))),
@@ -668,11 +721,40 @@ function renderResults(state) {
   });
   table.replaceChildren(el("thead", {}, head), el("tbody", {}, rows));
 
-  // Charts: add a changing query so the browser fetches fresh images.
-  const bust = Date.now();
-  $$("[data-chart]").forEach((img) => {
-    img.src = `/api/grade/export/${img.dataset.chart}?inline=true&t=${bust}`;
-  });
+  renderDownloads(state);
+}
+
+/** Friendly label for an export file, e.g. "most_missed_v2.png" -> "Most missed (V2)". */
+const EXPORT_LABELS = {
+  "results.csv": "Results CSV", "item_analysis.csv": "Question analysis CSV",
+  "score_distribution": "Score distribution", "most_missed": "Most missed",
+  "choice_distribution": "Choice distribution", "all_results.zip": "Everything (ZIP)",
+};
+function exportLabel(name) {
+  if (EXPORT_LABELS[name]) return EXPORT_LABELS[name];
+  const m = name.match(/^(.*?)(?:_v(\d))?\.png$/);
+  const base = EXPORT_LABELS[m[1]] || m[1];
+  return m[2] ? `${base} (V${m[2]})` : base;
+}
+
+/** Download buttons and chart previews; per-version charts on multi-version exams. */
+function renderDownloads(state) {
+  $("#downloads").replaceChildren(...state.exports.map((name, i) =>
+    el("a", { class: "button " + (i === 0 ? "primary" : "ghost"),
+              href: `/api/grade/export/${name}` }, exportLabel(name))));
+
+  const bust = Date.now();  // changing query so the browser fetches fresh images
+  const charts = state.exports.filter((n) => n.endsWith(".png"));
+  const nodes = [];
+  for (const name of charts) {
+    const version = (name.match(/_v(\d)\.png$/) || [])[1];
+    if (version && name.startsWith("most_missed")) {
+      nodes.push(el("p", { class: "chart-heading" }, `Version ${version}`));
+    }
+    nodes.push(el("img", { src: `/api/grade/export/${name}?inline=true&t=${bust}`,
+                           alt: `${exportLabel(name)} chart`, loading: "lazy" }));
+  }
+  $("#charts").replaceChildren(...nodes);
 }
 
 function writtenInput(student, w) {

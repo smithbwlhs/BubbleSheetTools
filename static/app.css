@@ -214,6 +214,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .file-btn:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
 .file-btn input, .drop-zone input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 
+.key-list { list-style: none; padding: 0; margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.key-list li { border: 1px solid var(--rule); background: var(--surface); border-radius: 3px;
+  padding: 6px 12px; font-size: 0.88rem; display: flex; gap: 8px; align-items: center; }
+.key-list li.loaded { border-color: var(--accent); }
+.key-list .kv { font: 500 0.75rem var(--mono); letter-spacing: 0.06em; text-transform: uppercase; }
+.key-list .missing { color: var(--danger); }
+.chart-heading { font: 500 0.72rem var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-3); margin: 12px 0 -8px; }
+.choices.versions button { font-weight: 600; }
+
 .big-file { padding: 14px 24px; font-size: 1.02rem; }
 .start-note { max-width: 62ch; margin-top: 18px; }
 

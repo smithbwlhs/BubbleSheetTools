@@ -49,6 +49,7 @@ MAX_QUESTIONS = 100
 MAX_CHOICES = 10
 MIN_CHOICES = 2
 MAX_WRITTEN = 20
+MAX_VERSIONS = 4
 MIN_WRITTEN_HEIGHT_IN = 0.5
 CHOICE_LETTERS = "ABCDEFGHIJ"
 
@@ -59,6 +60,11 @@ QUESTION_LABEL_W = 30.0
 MAX_BUBBLE_PITCH = 22.0
 WRITTEN_LABEL_H = 14.0
 WRITTEN_GAP = 10.0
+# Row where students bubble their exam version (only when there are 2+ versions).
+VERSION_ROW_H = 30.0
+VERSION_LABEL_W = 58.0
+VERSION_BUBBLE_R = 7.0
+VERSION_BUBBLE_PITCH = 24.0
 
 
 class LayoutError(ValueError):
@@ -79,6 +85,7 @@ class ExamSpec:
     num_choices: int
     written_heights: tuple[float, ...] = ()  # height of each box, inches
     exam_id: str = field(default_factory=lambda: secrets.token_hex(4))
+    num_versions: int = 1  # 2-4 adds a "Version" bubble row to student sheets
 
     def validate(self) -> None:
         if not self.class_name.strip():
@@ -95,6 +102,8 @@ class ExamSpec:
             raise LayoutError(
                 f"Answer choices per question must be between {MIN_CHOICES} and {MAX_CHOICES}."
             )
+        if not 1 <= self.num_versions <= MAX_VERSIONS:
+            raise LayoutError(f"Number of exam versions must be between 1 and {MAX_VERSIONS}.")
         if len(self.written_heights) > MAX_WRITTEN:
             raise LayoutError(f"At most {MAX_WRITTEN} written responses are supported.")
         max_h = max_written_height_in()
@@ -113,6 +122,7 @@ class SheetIdentity:
     kind: str          # "s" = student sheet, "k" = answer key sheet
     student_name: str  # "" for the key
     student_index: int  # position in the roster (0 for the key)
+    version: int = 0   # key sheets: which version they are the key for (students bubble theirs)
 
 
 # ------------------------------------------------------------ QR codes ----
@@ -132,6 +142,11 @@ def encode_qr(spec: ExamSpec, who: SheetIdentity, page: int) -> str:
         "i": who.student_index,
         "p": page,
     }
+    # Only multi-version exams carry version fields, keeping QR codes small.
+    if spec.num_versions > 1:
+        payload["vn"] = spec.num_versions
+    if who.version:
+        payload["vv"] = who.version
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -148,8 +163,10 @@ def decode_qr(text: str) -> tuple[ExamSpec, SheetIdentity, int]:
             num_choices=int(d["k"]),
             written_heights=tuple(float(h) for h in d.get("w", [])),
             exam_id=str(d["x"]),
+            num_versions=int(d.get("vn", 1)),
         )
-        who = SheetIdentity(kind=str(d["t"]), student_name=str(d["n"]), student_index=int(d["i"]))
+        who = SheetIdentity(kind=str(d["t"]), student_name=str(d["n"]),
+                            student_index=int(d["i"]), version=int(d.get("vv", 0)))
         page = int(d["p"])
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("This QR code is not from a BubbleSheetTools sheet.") from exc
@@ -196,6 +213,10 @@ class WrittenBox:
 class PageLayout:
     page: int  # 1-based
     bubbles: list[Bubble] = field(default_factory=list)
+    # Version row (page 1 of multi-version exams). These bubbles use
+    # question=0 and choice = version - 1.
+    version_bubbles: list[Bubble] = field(default_factory=list)
+    version_label: QuestionLabel | None = None
     labels: list[QuestionLabel] = field(default_factory=list)
     headers: list[ColumnHeader] = field(default_factory=list)
     written: list[WrittenBox] = field(default_factory=list)
@@ -217,33 +238,45 @@ def build_layout(spec: ExamSpec) -> list[PageLayout]:
     pages = [PageLayout(page=1)]
     cursor_y = BODY_TOP  # next free y position on the current page
 
+    page = pages[0]
+    grid_top = BODY_TOP
+
+    # ---- version row (multi-version exams only) ----
+    if spec.num_versions > 1:
+        y = BODY_TOP + VERSION_ROW_H / 2 - 4
+        page.version_label = QuestionLabel(0, CONTENT_LEFT + VERSION_LABEL_W, y)
+        first_x = CONTENT_LEFT + VERSION_LABEL_W + 10 + VERSION_BUBBLE_R
+        for v in range(spec.num_versions):
+            page.version_bubbles.append(
+                Bubble(0, v, first_x + v * VERSION_BUBBLE_PITCH, y, VERSION_BUBBLE_R))
+        grid_top = BODY_TOP + VERSION_ROW_H
+
     # ---- multiple choice grid (always fits on page 1) ----
     cols = grid_columns(spec.num_questions)
     rows = math.ceil(spec.num_questions / cols)
     col_w = CONTENT_W / cols
-    grid_h = BODY_BOTTOM - BODY_TOP - COLUMN_HEADER_H
+    grid_h = BODY_BOTTOM - grid_top - COLUMN_HEADER_H
     row_pitch = min(MAX_ROW_PITCH, grid_h / rows)
     bubble_pitch = min(MAX_BUBBLE_PITCH, (col_w - QUESTION_LABEL_W - 12) / spec.num_choices)
     radius = min(row_pitch, bubble_pitch) * 0.38
 
-    page = pages[0]
     for col in range(cols):
         col_x = CONTENT_LEFT + col * col_w
         first_bubble_x = col_x + QUESTION_LABEL_W + 6 + bubble_pitch / 2
         for c in range(spec.num_choices):
             page.headers.append(
                 ColumnHeader(CHOICE_LETTERS[c], first_bubble_x + c * bubble_pitch,
-                             BODY_TOP + COLUMN_HEADER_H / 2)
+                             grid_top + COLUMN_HEADER_H / 2)
             )
         for row in range(rows):
             q = col * rows + row + 1
             if q > spec.num_questions:
                 break
-            y = BODY_TOP + COLUMN_HEADER_H + row_pitch * (row + 0.5)
+            y = grid_top + COLUMN_HEADER_H + row_pitch * (row + 0.5)
             page.labels.append(QuestionLabel(q, col_x + QUESTION_LABEL_W, y))
             for c in range(spec.num_choices):
                 page.bubbles.append(Bubble(q, c, first_bubble_x + c * bubble_pitch, y, radius))
-    cursor_y = BODY_TOP + COLUMN_HEADER_H + row_pitch * rows + WRITTEN_GAP * 2
+    cursor_y = grid_top + COLUMN_HEADER_H + row_pitch * rows + WRITTEN_GAP * 2
 
     # ---- written response boxes (flow onto extra pages as needed) ----
     for i, height_in in enumerate(spec.written_heights, start=1):

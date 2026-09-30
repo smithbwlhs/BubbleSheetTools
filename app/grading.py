@@ -2,6 +2,10 @@
 Grading: read uploaded sheets, compare them to the key and keep the results
 for one teacher's grading session.
 
+Exams can have up to 4 versions (e.g. scrambled question or choice order).
+Each version has its own answer key; students bubble their version on the
+sheet and are graded against that version's key. Analysis is per version.
+
 Everything here lives in memory only (see sessions.py). Student names come
 from the QR codes on the sheets and are discarded when the session ends.
 """
@@ -10,14 +14,15 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .answer_key import AnswerKey, AnswerKeyError, parse_key_csv
+from .answer_key import AnswerKey, AnswerKeyError, parse_key_csv, parse_versioned_key_csv
 from .results_import import ImportedResults, parse_results_csv
 from .scanner.align import AlignError, locate_page
 from .scanner.bubbles import QuestionRead, read_bubbles, row_snippet_png
 from .scanner.loader import UploadError, load_pages
-from .sheet_layout import CHOICE_LETTERS, ExamSpec, build_layout, decode_qr
+from .sheet_layout import CHOICE_LETTERS, MAX_VERSIONS, ExamSpec, build_layout, decode_qr
 
 MULTI_MODES = ("all", "any")  # how questions with several correct answers are scored
+VERSION_QUESTION = 0          # flags / reads keyed 0 are about the version row
 
 
 def letters(choices) -> str:
@@ -38,15 +43,22 @@ def parse_letters(text: str, num_choices: int) -> frozenset[int]:
     return frozenset(out)
 
 
+def _decode(data: bytes) -> str:
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")  # some Excel "CSV" saves
+
+
 # ------------------------------------------------------------ records ----
 
 @dataclass
 class Flag:
-    """A question that could not be read with confidence."""
+    """A question (or the version row, question 0) that needs a human look."""
 
     question: int
-    reason: str               # "unclear", "multiple", "blank" or "csv"
-    detected: frozenset[int]  # what the scanner thinks is marked
+    reason: str               # see describe()
+    detected: frozenset[int]  # what the scanner thinks is marked (versions: index = v - 1)
     snippet_png: bytes        # cropped image of the row (empty when restored from a CSV)
     resolved: bool = False
 
@@ -57,6 +69,12 @@ class Flag:
             "blank": "No bubble is filled in.",
             "csv": "Still marked for checking in the uploaded results CSV "
                    "(no scan image is available; check the paper sheet).",
+            "version-blank": "No version is bubbled in. Pick the student's version.",
+            "version-multiple": "More than one version is bubbled in. Pick the student's version.",
+            "version-unclear": "The version bubble is faint or partly erased. "
+                               "Pick the student's version.",
+            "version-csv": "The version was still unknown in the uploaded results CSV. "
+                           "Check the paper sheet and pick the version.",
         }[self.reason]
 
 
@@ -67,6 +85,7 @@ class StudentResult:
     class_name: str = ""
     exam_id: str = ""                # print batch, from the QR code
     roster_index: int | None = None  # position in that batch's roster, if known
+    version: int | None = 1          # exam version; None until known (multi-version exams)
     answers: dict[int, frozenset[int]] | None = None  # None until page 1 is scanned
     flags: dict[int, Flag] = field(default_factory=dict)
     written_scores: dict[int, float | None] = field(default_factory=dict)
@@ -101,8 +120,10 @@ class GradingSession:
     user_id: str
     created: float = field(default_factory=time.time)
     touched: float = field(default_factory=time.time)
-    key: AnswerKey | None = None
-    key_source: str = ""
+    # One answer key per exam version (just {1: key} for single-version exams).
+    keys: dict[int, AnswerKey] = field(default_factory=dict)
+    key_sources: dict[int, str] = field(default_factory=dict)
+    num_versions: int = 1
     spec: ExamSpec | None = None
     # Print batches whose sheets belong to this session. Usually one; several
     # when results CSVs from different class periods are combined.
@@ -114,6 +135,99 @@ class GradingSession:
     done: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
     _next_id: int = 1
+
+    # ------------------------------------------------------------ keys ----
+
+    @property
+    def versions(self) -> list[int]:
+        return list(range(1, self.num_versions + 1))
+
+    def missing_versions(self) -> list[int]:
+        return [v for v in self.versions if v not in self.keys]
+
+    @property
+    def ready(self) -> bool:
+        """True when every version has a key (so student sheets can be graded)."""
+        return bool(self.keys) and not self.missing_versions()
+
+    @property
+    def num_questions(self) -> int:
+        return next(iter(self.keys.values())).num_questions if self.keys else 0
+
+    @property
+    def questions(self) -> list[int]:
+        return list(range(1, self.num_questions + 1))
+
+    def key_for(self, version: int | None) -> AnswerKey | None:
+        return self.keys.get(version) if version else None
+
+    def set_num_versions(self, n: int) -> None:
+        """Teacher says how many versions the exam has (for CSV keys)."""
+        if not 1 <= n <= MAX_VERSIONS:
+            raise ValueError(f"An exam can have 1 to {MAX_VERSIONS} versions.")
+        with self.lock:
+            self._no_students_yet()
+            if self.spec and self.exam_ids and n != self.spec.num_versions:
+                raise ValueError(f"The scanned key sheet says this exam has "
+                                 f"{self.spec.num_versions} version(s).")
+            self.num_versions = n
+            for v in [v for v in self.keys if v > n]:
+                del self.keys[v], self.key_sources[v]
+            self.touch()
+
+    def set_key_from_upload(self, filename: str, data: bytes, version: int | None = None) -> list[int]:
+        """Load answer key(s) from a CSV or scanned key sheet(s).
+
+        * Scanned key sheets say which version they are (QR code); several can
+          be in one PDF.
+        * A CSV with "Version 1, Version 2, ..." columns sets every version.
+        * Any other CSV is the key for `version` (chosen on the page; default 1).
+        Returns the versions that were set.
+        """
+        if not data:
+            raise AnswerKeyError("The answer key file is empty.")
+        spec, has_version_columns = None, False
+        if filename.lower().endswith((".csv", ".txt")):
+            text = _decode(data)
+            found = parse_versioned_key_csv(text)
+            has_version_columns = found is not None
+            if found is None:
+                found = {version or 1: parse_key_csv(text)}
+        else:
+            found, spec = _read_key_sheets(filename, data)
+
+        with self.lock:
+            self._no_students_yet()
+            if spec is not None:
+                if self.spec and self.exam_ids and spec.exam_id not in self.exam_ids:
+                    raise AnswerKeyError(
+                        "That key sheet is from a different print batch than the key(s) "
+                        "already loaded. Start a new session to switch exams.")
+                self.spec, self.num_versions = spec, spec.num_versions
+                self.exam_ids = {spec.exam_id}
+            elif has_version_columns:
+                # "Version 1, Version 2, ..." columns say how many versions there are.
+                self.num_versions = max(self.num_versions, max(found))
+            elif max(found) > self.num_versions:
+                raise AnswerKeyError(
+                    f"This exam is set to {self.num_versions} version(s); there is no "
+                    f"version {max(found)}. Change the number of versions first.")
+            others = [k for v, k in self.keys.items() if v not in found]
+            for key in found.values():
+                if others and key.num_questions != others[0].num_questions:
+                    raise AnswerKeyError(
+                        f"This key has {key.num_questions} questions but the key already "
+                        f"loaded has {others[0].num_questions}. All versions must match.")
+            for v, key in found.items():
+                self.keys[v], self.key_sources[v] = key, filename
+            self.touch()
+            return sorted(found)
+
+    def _no_students_yet(self) -> None:
+        if self.students:
+            raise AnswerKeyError(
+                "Sheets have already been graded with the current key(s). "
+                "Start a new grading session to change the answer key.")
 
     # -------------------------------------------------------- students ----
 
@@ -144,29 +258,6 @@ class GradingSession:
             elif s.name.strip().lower() == name.strip().lower():
                 return s
         return None
-    # ------------------------------------------------------------ key ----
-
-    def set_key_from_upload(self, filename: str, data: bytes) -> None:
-        """Load the answer key from a CSV file or a scanned key sheet."""
-        if not data:
-            raise AnswerKeyError("The answer key file is empty.")
-        if filename.lower().endswith(".csv") or filename.lower().endswith(".txt"):
-            try:
-                text = data.decode("utf-8-sig")
-            except UnicodeDecodeError:
-                text = data.decode("latin-1")
-            key, spec = parse_key_csv(text), None
-        else:
-            key, spec = _read_key_sheet(filename, data)
-
-        with self.lock:
-            if self.students:
-                raise AnswerKeyError(
-                    "Sheets have already been graded with the current key. "
-                    "Start a new grading session to use a different key.")
-            self.key, self.spec, self.key_source = key, spec, filename
-            self.exam_ids = {spec.exam_id} if spec else set()
-            self.touch()
 
     # ------------------------------------------------- results imports ----
 
@@ -174,11 +265,7 @@ class GradingSession:
         """Load (or merge in) a results CSV previously downloaded from this site."""
         if not data:
             raise AnswerKeyError(f"{filename} is empty.")
-        try:
-            text = data.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = data.decode("latin-1")  # some Excel "CSV" saves
-        imported = parse_results_csv(filename, text)
+        imported = parse_results_csv(filename, _decode(data))
 
         with self.lock:
             self._merge_exam(imported, filename)
@@ -194,6 +281,7 @@ class GradingSession:
                     student = existing
                     student.add_note(f"replaced by {filename}")
                     replaced += 1
+                student.version = row.version
                 student.answers = dict(row.answers) if row.answers is not None else None
                 student.written_scores = dict(row.written)
                 student.pages_seen = {1} if row.answers is not None else set()
@@ -201,6 +289,9 @@ class GradingSession:
                     q: Flag(q, "csv", student.answers.get(q, frozenset()), b"")
                     for q in row.uncertain
                 }
+                if row.version is None and row.answers is not None:
+                    student.flags[VERSION_QUESTION] = Flag(VERSION_QUESTION, "version-csv",
+                                                           frozenset(), b"")
             self.imported_files.append(filename)
             self.done = True
             self.touch()
@@ -208,19 +299,23 @@ class GradingSession:
                 "warnings": imported.warnings}
 
     def _merge_exam(self, imported: ImportedResults, filename: str) -> None:
-        """Adopt the imported key/exam, or check it matches the one loaded."""
-        if self.key is None:
-            self.key = AnswerKey(answers=dict(imported.key), num_choices=imported.num_choices)
+        """Adopt the imported key(s)/exam, or check they match those loaded."""
+        if not self.keys:
+            self.keys = {v: AnswerKey(answers=dict(a), num_choices=imported.num_choices)
+                         for v, a in imported.keys.items()}
+            self.key_sources = {v: filename for v in imported.keys}
+            self.num_versions = imported.num_versions
             first_class = next((s.class_name for s in imported.students if s.class_name), "")
             self.spec = ExamSpec(
                 class_name=first_class, exam_name=imported.exam_name,
                 num_questions=imported.num_questions, num_choices=imported.num_choices,
                 written_heights=imported.written_heights,
-                exam_id=min(imported.exam_ids, default="restored"))
-            self.key_source = filename
+                exam_id=min(imported.exam_ids, default="restored"),
+                num_versions=imported.num_versions)
             self.multi_mode = imported.multi_mode
         else:
-            if dict(self.key.answers) != dict(imported.key):
+            mine = {v: dict(k.answers) for v, k in self.keys.items()}
+            if mine != {v: dict(a) for v, a in imported.keys.items()}:
                 raise AnswerKeyError(
                     f"{filename} has a different answer key from the results already loaded, "
                     "so it can't be combined with them.")
@@ -236,8 +331,12 @@ class GradingSession:
 
     def process_upload(self, filename: str, data: bytes, max_pages: int) -> dict:
         """Read every page of an uploaded file. Returns a short summary."""
-        if self.key is None:
+        if not self.keys:
             raise AnswerKeyError("Upload the answer key before uploading student sheets.")
+        if self.missing_versions():
+            missing = ", ".join(map(str, self.missing_versions()))
+            raise AnswerKeyError(f"Upload the answer key for version {missing} before "
+                                 "uploading student sheets.")
         try:
             images = load_pages(filename, data, max_pages=max_pages)
         except UploadError as exc:
@@ -276,7 +375,7 @@ class GradingSession:
             raise PageProblem(str(exc)) from None
 
         if who.kind == "k":
-            raise PageProblem("This is the answer key sheet; it was skipped.", level="info")
+            raise PageProblem("This is an answer key sheet; it was skipped.", level="info")
 
         with self.lock:
             self._check_same_exam(spec)
@@ -301,32 +400,47 @@ class GradingSession:
         # Bubble reading is the slow part; do it outside the lock.
         layout = build_layout(spec)[0]
         reads = read_bubbles(canon, layout)
-        answers, flags = {}, {}
+        flags = {}
+
+        version_read = reads.pop(VERSION_QUESTION, None)
+        version = 1
+        if version_read is not None:
+            version, reason = _read_version(version_read)
+            if reason:
+                flags[VERSION_QUESTION] = Flag(VERSION_QUESTION, reason, version_read.marked,
+                                               row_snippet_png(canon, layout, VERSION_QUESTION))
+
+        answers = {}
         for q, read in reads.items():
             answers[q] = read.marked
-            reason = self._flag_reason(q, read)
+            reason = self._flag_reason(q, read, version)
             if reason:
                 flags[q] = Flag(q, reason, read.marked, row_snippet_png(canon, layout, q))
 
         with self.lock:
-            student.answers, student.flags = answers, flags
+            student.version, student.answers, student.flags = version, answers, flags
             student.pages_seen.add(1)
         return student.name
 
     def _check_same_exam(self, spec: ExamSpec) -> None:
-        """Make sure an uploaded sheet belongs to the same exam as the key."""
+        """Make sure an uploaded sheet belongs to the same exam as the key(s)."""
         if not self.exam_ids:
-            # Key came from a CSV (or an older results CSV without sheet IDs):
+            # Keys came from CSVs (or an older results CSV without sheet IDs):
             # the first sheet defines the print batch, but it must match the
-            # key's number of questions and choices.
-            if self.key.num_questions != spec.num_questions:
+            # keys' number of questions, choices and versions.
+            if self.num_questions != spec.num_questions:
                 raise PageProblem(
-                    f"The answer key has {self.key.num_questions} questions but this sheet has "
+                    f"The answer key has {self.num_questions} questions but this sheet has "
                     f"{spec.num_questions}. Check that the key matches this exam.")
-            too_high = [q for q, ch in self.key.answers.items() if max(ch) >= spec.num_choices]
+            too_high = [q for k in self.keys.values() for q, ch in k.answers.items()
+                        if max(ch) >= spec.num_choices]
             if too_high:
                 raise PageProblem(
                     f"The answer key uses choices this sheet doesn't have (question {too_high[0]}).")
+            if spec.num_versions != self.num_versions:
+                raise PageProblem(
+                    f"This sheet is for an exam with {spec.num_versions} version(s), but "
+                    f"{self.num_versions} answer key version(s) are set up.")
             if self.spec is None:
                 self.spec = spec
             self.exam_ids.add(spec.exam_id)
@@ -335,25 +449,33 @@ class GradingSession:
                 f"This sheet is from a different exam ({spec.class_name} - {spec.exam_name}, "
                 "different print batch) and was skipped.")
 
-    def _flag_reason(self, q: int, read: QuestionRead) -> str | None:
+    def _flag_reason(self, q: int, read: QuestionRead, version: int | None) -> str | None:
         if read.unclear:
             return "unclear"
         if not read.marked:
             return "blank"
-        correct = self.key.answers.get(q, frozenset())
-        if len(read.marked) > 1 and len(correct) <= 1:
+        # Several marks are only expected where the key has several answers.
+        # With the version still unknown, flag if any version expects one answer.
+        keys = [self.keys[version]] if version in self.keys else list(self.keys.values())
+        if len(read.marked) > 1 and any(len(k.answers.get(q, ())) <= 1 for k in keys):
             return "multiple"
         return None
 
     # --------------------------------------------------------- editing ----
 
     def resolve(self, student_id: int, question: int, answer: str) -> None:
-        """Teacher-confirmed answer for a flagged (or any) question."""
+        """Teacher-confirmed answer for a flagged (or any) question.
+        Question 0 is the version row; `answer` is then the version number."""
         with self.lock:
             student = self._student(student_id)
-            if student.answers is None or question not in student.answers:
-                raise ValueError("That question was not found on this student's sheet.")
-            student.answers[question] = parse_letters(answer, self.spec.num_choices)
+            if question == VERSION_QUESTION:
+                if not answer.strip().isdigit() or int(answer) not in self.versions:
+                    raise ValueError("Pick one of this exam's versions.")
+                student.version = int(answer)
+            else:
+                if student.answers is None or question not in student.answers:
+                    raise ValueError("That question was not found on this student's sheet.")
+                student.answers[question] = parse_letters(answer, self.spec.num_choices)
             if question in student.flags:
                 student.flags[question].resolved = True
             self.touch()
@@ -386,17 +508,18 @@ class GradingSession:
 
     # --------------------------------------------------------- scoring ----
 
-    def is_correct(self, question: int, given: frozenset[int]) -> bool:
-        correct = self.key.answers.get(question, frozenset())
+    def is_correct(self, question: int, given: frozenset[int], version: int = 1) -> bool:
+        correct = self.keys[version].answers.get(question, frozenset())
         if len(correct) > 1 and self.multi_mode == "any":
             return bool(given) and given <= correct
         return given == correct
 
-    def score(self, student: StudentResult) -> int:
-        if student.answers is None:
-            return 0
-        return sum(self.is_correct(q, student.answers.get(q, frozenset()))
-                   for q in self.key.answers)
+    def score(self, student: StudentResult) -> int | None:
+        """Number correct, or None if the sheet or the student's version is unknown."""
+        if student.answers is None or student.version not in self.keys:
+            return None
+        return sum(self.is_correct(q, student.answers.get(q, frozenset()), student.version)
+                   for q in self.questions)
 
 
 class PageProblem(Exception):
@@ -407,13 +530,27 @@ class PageProblem(Exception):
         self.level = level
 
 
-def _read_key_sheet(filename: str, data: bytes) -> tuple[AnswerKey, ExamSpec]:
-    """Read the ANSWER KEY sheet from a scanned PDF or photo."""
+def _read_version(read: QuestionRead) -> tuple[int | None, str | None]:
+    """Turn the version row into (version, flag reason)."""
+    if read.unclear:
+        return (min(read.marked) + 1 if len(read.marked) == 1 else None), "version-unclear"
+    if not read.marked:
+        return None, "version-blank"
+    if len(read.marked) > 1:
+        return None, "version-multiple"
+    return min(read.marked) + 1, None
+
+
+def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], ExamSpec]:
+    """Read ANSWER KEY sheet(s) from a scanned PDF or photo. A PDF may hold
+    the key sheets for several versions; each one's QR code says its version."""
     try:
         images = load_pages(filename, data, max_pages=20)
     except UploadError as exc:
         raise AnswerKeyError(str(exc)) from None
 
+    keys: dict[int, AnswerKey] = {}
+    spec_found = None
     problems = []
     for image in images:
         try:
@@ -423,10 +560,15 @@ def _read_key_sheet(filename: str, data: bytes) -> tuple[AnswerKey, ExamSpec]:
             problems.append(str(exc))
             continue
         if who.kind != "k":
-            problems.append(f"That is {who.student_name}'s sheet, not the ANSWER KEY sheet.")
+            problems.append(f"That is {who.student_name}'s sheet, not an ANSWER KEY sheet.")
             continue
+        if spec_found and spec.exam_id != spec_found.exam_id:
+            raise AnswerKeyError(f"{filename} holds key sheets from different exams.")
+        version = who.version or 1
+        label = f"The version {version} answer key" if spec.num_versions > 1 else "The answer key"
 
         reads = read_bubbles(canon, build_layout(spec)[0])
+        reads.pop(0, None)  # the version row is pre-printed on key sheets
         blank = [q for q, r in reads.items() if not r.marked and not r.unclear]
         unclear = [q for q, r in reads.items() if r.unclear]
         if blank or unclear:
@@ -437,11 +579,13 @@ def _read_key_sheet(filename: str, data: bytes) -> tuple[AnswerKey, ExamSpec]:
                 parts.append(f"faint or partly erased marks on question(s) "
                              f"{', '.join(map(str, unclear[:15]))}")
             raise AnswerKeyError(
-                "The answer key could not be read reliably: " + "; ".join(parts) +
+                f"{label} could not be read reliably: " + "; ".join(parts) +
                 ". Darken or clean up those bubbles and re-scan, or upload a CSV key instead.")
-        key = AnswerKey(answers={q: r.marked for q, r in reads.items()},
-                        num_choices=spec.num_choices, exam_id=spec.exam_id)
-        return key, spec
+        keys[version] = AnswerKey(answers={q: r.marked for q, r in reads.items()},
+                                  num_choices=spec.num_choices, exam_id=spec.exam_id)
+        spec_found = spec
 
+    if keys:
+        return keys, spec_found
     detail = problems[0] if problems else "No pages found."
     raise AnswerKeyError(f"No answer key sheet could be read from {filename}. {detail}")

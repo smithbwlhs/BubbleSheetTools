@@ -3,9 +3,13 @@ Exports for a grading session: CSV files and PNG summary charts.
 
   results.csv        one row per student (score, written scores, every answer)
   item_analysis.csv  one row per question (% correct, # missed, choice counts)
-  score_distribution.png  histogram of student percentages
+  score_distribution.png  histogram of student percentages (all versions together)
   most_missed.png         questions ranked by how many students missed them
   choice_distribution.png horizontal stacked bars of which choice was picked
+
+Multi-version exams are analysed per version (question 5 on version 1 need
+not be question 5 on version 2), so the question analysis has a Version
+column and the per-question charts come as most_missed_v1.png, _v2.png, ...
 
 Colors come from a colorblind-validated categorical palette, assigned to answer
 letters in a fixed order (A = slot 1, B = slot 2, ...) so a letter always has
@@ -77,16 +81,20 @@ class ItemStats:
         return 100.0 * self.correct / total if total else 0.0
 
 
-def graded_students(session: GradingSession) -> list[StudentResult]:
-    """Students whose bubble page was read, by class then roster order."""
-    return [s for s in session.ordered_students() if s.answers is not None]
+def graded_students(session: GradingSession, version: int | None = None) -> list[StudentResult]:
+    """Students with a score (bubble page read, version known), by class then
+    roster order. With `version`, only students who took that version."""
+    return [s for s in session.ordered_students() if session.score(s) is not None
+            and (version is None or s.version == version)]
 
 
-def item_stats(session: GradingSession) -> list[ItemStats]:
-    students = graded_students(session)
+def item_stats(session: GradingSession, version: int = 1) -> list[ItemStats]:
+    """Per-question statistics for one version of the exam."""
+    students = graded_students(session, version)
+    key = session.keys[version]
     k = session.spec.num_choices
     stats = []
-    for q in sorted(session.key.answers):
+    for q in session.questions:
         counts = [0] * k
         correct = blank = 0
         for s in students:
@@ -95,9 +103,9 @@ def item_stats(session: GradingSession) -> list[ItemStats]:
                 blank += 1
             for c in given:
                 counts[c] += 1
-            correct += session.is_correct(q, given)
+            correct += session.is_correct(q, given, version)
         # Blank answers count as incorrect for scoring, and are also reported.
-        stats.append(ItemStats(q, letters(session.key.answers[q]), correct,
+        stats.append(ItemStats(q, letters(key.answers[q]), correct,
                                len(students) - correct, blank, counts))
     return stats
 
@@ -114,11 +122,13 @@ def results_csv(session: GradingSession) -> bytes:
     """One row per student. Also re-uploadable (see results_import.py), so it
     records the exam details in an EXAM INFO row and each student's sheet ID."""
     spec = session.spec
-    questions = sorted(session.key.answers)
+    questions = session.questions
     total_q = len(questions)
     n_written = len(spec.written_heights)
+    multi = session.num_versions > 1
     written_cols = [f"Written {n}" for n in range(1, n_written + 1)]
-    header = (["Student", "Class", "Sheet ID", "MC correct", "MC possible", "MC percent"]
+    header = (["Student", "Class"] + (["Version"] if multi else [])
+              + ["Sheet ID", "MC correct", "MC possible", "MC percent"]
               + written_cols + (["Total (MC + written)"] if n_written else [])
               + ["Needs review", "Notes"] + [f"Q{q}" for q in questions])
 
@@ -131,26 +141,34 @@ def results_csv(session: GradingSession) -> bytes:
                      "Sheet ID": f"questions={total_q}", "MC correct": f"choices={spec.num_choices}",
                      "MC possible": "written=" + ";".join(f"{h:g}" for h in spec.written_heights),
                      "MC percent": f"scoring={session.multi_mode}",
-                     "Needs review": "ids=" + ";".join(sorted(session.exam_ids))},
+                     "Needs review": "ids=" + ";".join(sorted(session.exam_ids)),
+                     "Notes": f"versions={session.num_versions}"},
                     [""] * total_q))
-    rows.append(row({"Student": "ANSWER KEY", "MC correct": total_q, "MC possible": total_q,
-                     "MC percent": 100.0},
-                    [letters(session.key.answers[q]) for q in questions]))
+    for v in session.versions:
+        rows.append(row({"Student": f"ANSWER KEY V{v}" if multi else "ANSWER KEY",
+                         "Version": v, "MC correct": total_q, "MC possible": total_q,
+                         "MC percent": 100.0},
+                        [letters(session.keys[v].answers[q]) for q in questions]))
 
     for s in session.ordered_students():
         base = {"Student": s.name, "Class": s.class_name, "Sheet ID": s.sheet_id,
+                "Version": s.version if s.version else "?",
                 "MC possible": total_q, "Notes": "; ".join(s.notes)}
         if s.answers is None:
-            rows.append(row({**base, "Needs review": "Bubble page not scanned"}, [""] * total_q))
+            rows.append(row({**base, "Version": "", "Needs review": "Bubble page not scanned"},
+                            [""] * total_q))
             continue
-        correct = session.score(s)
+        correct = session.score(s)  # None while the version is unknown
         written = {f"Written {n}": s.written_scores.get(n) for n in range(1, n_written + 1)}
-        total = correct + sum(w for w in written.values() if w is not None)
         open_flags = sorted(f.question for f in s.open_flags)
-        values = {**base, "MC correct": correct, "MC percent": round(100 * correct / total_q, 1),
-                  **{k: ("" if v is None else v) for k, v in written.items()},
-                  "Total (MC + written)": total,
-                  "Needs review": ", ".join(f"Q{q}" for q in open_flags)}
+        review = ["Version" if q == 0 else f"Q{q}" for q in open_flags]
+        values = {**base, **{k: ("" if v is None else v) for k, v in written.items()},
+                  "Needs review": ", ".join(review)}
+        if correct is not None:
+            values.update({"MC correct": correct,
+                           "MC percent": round(100 * correct / total_q, 1),
+                           "Total (MC + written)":
+                               correct + sum(w for w in written.values() if w is not None)})
         answers = [letters(s.answers.get(q, frozenset())) + ("?" if q in open_flags else "")
                    for q in questions]
         rows.append(row(values, answers))
@@ -158,12 +176,17 @@ def results_csv(session: GradingSession) -> bytes:
 
 
 def item_analysis_csv(session: GradingSession) -> bytes:
+    """Per-question statistics; one block of rows per version on multi-version exams."""
     k = session.spec.num_choices
-    rows = [["Question", "Correct answer", "% correct", "# correct", "# incorrect", "# blank"]
+    multi = session.num_versions > 1
+    rows = [(["Version"] if multi else [])
+            + ["Question", "Correct answer", "% correct", "# correct", "# incorrect", "# blank"]
             + [f"# chose {CHOICE_LETTERS[c]}" for c in range(k)]]
-    for it in item_stats(session):
-        rows.append([it.question, it.key, round(it.pct_correct, 1), it.correct, it.incorrect,
-                     it.blank, *it.choice_counts])
+    for v in session.versions:
+        for it in item_stats(session, v):
+            rows.append(([v] if multi else [])
+                        + [it.question, it.key, round(it.pct_correct, 1), it.correct,
+                           it.incorrect, it.blank, *it.choice_counts])
     return _csv_bytes(rows)
 
 
@@ -184,7 +207,13 @@ def _style(ax, grid_axis: str) -> None:
     ax.tick_params(length=0)
 
 
-def _title(session: GradingSession, what: str) -> str:
+def _title(session: GradingSession, what: str, version: int | None = None,
+           detail: str = "") -> str:
+    """Two-line chart title: what (+ version, + detail), then class and exam."""
+    if version and session.num_versions > 1:
+        what = f"{what} \u2014 Version {version}"
+    if detail:
+        what = f"{what}  ({detail})"
     classes = " / ".join(session.class_names())  # several when periods are combined
     prefix = f"{classes} — " if classes else ""
     return f"{what}\n{prefix}{session.spec.exam_name}"
@@ -192,7 +221,7 @@ def _title(session: GradingSession, what: str) -> str:
 
 def score_distribution_png(session: GradingSession) -> bytes:
     students = graded_students(session)
-    total_q = len(session.key.answers)
+    total_q = session.num_questions
     pcts = [100 * session.score(s) / total_q for s in students]
     bins = list(range(0, 101, 10))
     counts = [0] * 10
@@ -210,13 +239,14 @@ def score_distribution_png(session: GradingSession) -> bytes:
     ax.set_ylabel("Students")
     ax.yaxis.get_major_locator().set_params(integer=True)
     avg = sum(pcts) / len(pcts) if pcts else 0
-    ax.set_title(_title(session, f"Score distribution  (n = {len(pcts)}, mean {avg:.0f}%)"))
+    scope = ", all versions" if session.num_versions > 1 else ""
+    ax.set_title(_title(session, f"Score distribution  (n = {len(pcts)}{scope}, mean {avg:.0f}%)"))
     _style(ax, "y")
     return _png(fig)
 
 
-def most_missed_png(session: GradingSession) -> bytes:
-    stats = sorted(item_stats(session), key=lambda it: (-it.incorrect, it.question))
+def most_missed_png(session: GradingSession, version: int = 1) -> bytes:
+    stats = sorted(item_stats(session, version), key=lambda it: (-it.incorrect, it.question))
     n = len(stats)
     fig, ax = plt.subplots(figsize=(7, max(2.5, 0.22 * n + 1.2)))
     ys = list(range(n))
@@ -224,7 +254,7 @@ def most_missed_png(session: GradingSession) -> bytes:
             edgecolor=SURFACE, linewidth=1)
     ax.set_yticks(ys, [f"Q{it.question}" for it in stats])
     ax.invert_yaxis()  # most missed at the top
-    total = len(graded_students(session))
+    total = len(graded_students(session, version))
     for y, it in zip(ys, stats):
         ax.text(it.incorrect + total * 0.01, y, f"{it.incorrect} missed · "
                 f"{it.pct_correct:.0f}% correct · key {it.key}",
@@ -232,13 +262,13 @@ def most_missed_png(session: GradingSession) -> bytes:
     ax.set_xlim(0, max(max((it.incorrect for it in stats), default=0), 1) * 1.6)
     ax.set_xlabel("Students who answered incorrectly or left it blank")
     ax.xaxis.get_major_locator().set_params(integer=True)
-    ax.set_title(_title(session, "Most missed questions"))
+    ax.set_title(_title(session, "Most missed questions", version, f"n = {total}"))
     _style(ax, "x")
     return _png(fig)
 
 
-def choice_distribution_png(session: GradingSession) -> bytes:
-    stats = item_stats(session)
+def choice_distribution_png(session: GradingSession, version: int = 1) -> bytes:
+    stats = item_stats(session, version)
     k = session.spec.num_choices
     n = len(stats)
 
@@ -280,23 +310,31 @@ def choice_distribution_png(session: GradingSession) -> bytes:
     handles.append(Patch(color=NEUTRAL, label="Blank"))
     ax.legend(handles=handles, ncol=len(handles), loc="lower left", bbox_to_anchor=(0, 1.0),
               frameon=False, fontsize=8, handlelength=1.2, columnspacing=1.0)
-    ax.set_title(_title(session, "Answer choice distribution"), pad=24)
+    ax.set_title(_title(session, "Answer choice distribution", version), pad=24)
     _style(ax, "x")
     return _png(fig)
 
 
-CHARTS = {
-    "score_distribution": score_distribution_png,
-    "most_missed": most_missed_png,
-    "choice_distribution": choice_distribution_png,
-}
+def export_files(session: GradingSession) -> dict[str, tuple[str, callable]]:
+    """Every download for this session: {file name: (media type, builder)}.
+    Per-question charts are made for each version separately."""
+    files = {
+        "results.csv": ("text/csv", results_csv),
+        "item_analysis.csv": ("text/csv", item_analysis_csv),
+        "score_distribution.png": ("image/png", score_distribution_png),
+    }
+    for v in session.versions:
+        suffix = f"_v{v}" if session.num_versions > 1 else ""
+        files[f"most_missed{suffix}.png"] = (
+            "image/png", lambda sess, v=v: most_missed_png(sess, v))
+        files[f"choice_distribution{suffix}.png"] = (
+            "image/png", lambda sess, v=v: choice_distribution_png(sess, v))
+    return files
 
 
 def all_exports_zip(session: GradingSession) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("results.csv", results_csv(session))
-        z.writestr("item_analysis.csv", item_analysis_csv(session))
-        for name, fn in CHARTS.items():
-            z.writestr(f"{name}.png", fn(session))
+        for name, (_, build) in export_files(session).items():
+            z.writestr(name, build(session))
     return buf.getvalue()
