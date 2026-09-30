@@ -124,3 +124,8 @@ def test_signup_requires_adult_confirmation():
                                               "email": "a@b.co", "password": "longenough",
                                               "is_adult": False})
     assert r.status_code == 400 and "18 or older" in r.json()["detail"]
+
+
+def test_change_password_needs_login_cookie():
+    r = client.post("/api/auth/password", json={"password": "longenough"})
+    assert r.status_code == 401 and "sign in again" in r.json()["detail"]

@@ -8,7 +8,7 @@ Routes
     POST /api/sheets            download the bubble sheet PDF
 
   Accounts (Supabase, see auth.py)
-    POST /api/auth/signup | login | logout | forgot | reset
+    POST /api/auth/signup | login | logout | forgot | reset | password
     GET  /api/auth/me
 
   Grading (signed-in teachers only; everything held in memory, see sessions.py)
@@ -205,6 +205,20 @@ def forgot(body: ForgotIn, request: Request):
 def reset(body: ResetIn):
     _auth_call(auth.update_password, body.access_token, body.password)
     return {"message": "Password updated. You can sign in now."}
+
+
+class PasswordIn(BaseModel):
+    password: str = Field("", max_length=200)
+
+
+@app.post("/api/auth/password")
+def change_password(body: PasswordIn, request: Request, user: dict = Depends(auth.require_user)):
+    """Signed-in teacher changes their password (uses their login cookie)."""
+    token = request.cookies.get(auth.ACCESS_COOKIE)
+    if not token:
+        raise _bad("Please sign in again to change your password.", 401)
+    _auth_call(auth.update_password, token, body.password)
+    return {"message": "Your password has been changed."}
 
 
 @app.get("/api/auth/me")

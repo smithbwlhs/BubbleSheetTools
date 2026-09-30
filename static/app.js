@@ -232,13 +232,16 @@ function renderAccount() {
   const box = $("#account");
   box.replaceChildren();
   if (currentUser) {
-    box.append(el("span", { class: "muted" }, `Signed in as ${currentUser.first_name || currentUser.email}`),
-      el("button", { class: "small-btn", onclick: signOut }, "Sign out"));
+    const name = [currentUser.first_name, currentUser.last_name].filter(Boolean).join(" ");
+    box.append(el("span", {}, name || currentUser.email),
+      el("button", { class: "link", type: "button", onclick: () => openPasswordDialog("change") },
+        "Change password"),
+      el("button", { class: "ghost small-btn", type: "button", onclick: signOut }, "Sign out"));
   }
 }
 
 function setupAuth() {
-  $$(".subtab").forEach((b) => b.addEventListener("click", () => showAuthForm(b.dataset.auth)));
+  $$("[data-auth]").forEach((b) => b.addEventListener("click", () => showAuthForm(b.dataset.auth)));
   $("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     await authAction(() => api("/api/auth/login", { method: "POST", json: {
@@ -263,19 +266,54 @@ function setupAuth() {
     }
     await authAction(() => api("/api/auth/forgot", { method: "POST", json: { email } }));
   });
-  $("#reset-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ok = await authAction(() => api("/api/auth/reset", { method: "POST", json: {
-      access_token: resetToken, password: $("#reset-password").value } }));
-    if (ok) { resetToken = null; showAuthForm("login"); }
-  });
+  $("#password-form").addEventListener("submit", savePassword);
+  $("#password-cancel").addEventListener("click", () => $("#password-dialog").close());
 }
 
+/** Show either the sign-in or the create-account form (never both). */
 function showAuthForm(which) {
-  $$(".subtab").forEach((b) => b.classList.toggle("active", b.dataset.auth === which));
   show($("#login-form"), which === "login");
   show($("#signup-form"), which === "signup");
-  show($("#reset-form"), which === "reset");
+  $("#auth-title").textContent = which === "signup" ? "Create a teacher account" : "Sign in to grade";
+  setAlert($("#auth-message"), "");
+}
+
+/*
+ * New-password dialog. It opens only in two situations:
+ *   "reset":  the teacher followed a password-reset email link (resetToken is set)
+ *   "change": a signed-in teacher chose "Change password"
+ */
+let passwordMode = null;
+
+function openPasswordDialog(mode) {
+  passwordMode = mode;
+  $("#new-password").value = "";
+  setAlert($("#password-message"), "");
+  $("#password-dialog").showModal();
+  $("#new-password").focus();
+}
+
+async function savePassword(e) {
+  e.preventDefault();
+  const msg = $("#password-message");
+  const password = $("#new-password").value;
+  if (password.length < 8) { setAlert(msg, "Passwords must be at least 8 characters.", "error"); return; }
+  try {
+    const res = passwordMode === "reset"
+      ? await api("/api/auth/reset", { method: "POST", json: { access_token: resetToken, password } })
+      : await api("/api/auth/password", { method: "POST", json: { password } });
+    $("#password-dialog").close();
+    if (passwordMode === "reset") {
+      resetToken = null;
+      selectTab("grade");
+      showAuthForm("login");
+      setAlert($("#auth-message"), res.message, "ok");
+    } else {
+      setAlert($("#global-message"), res.message, "ok");
+    }
+  } catch (err) {
+    setAlert(msg, err.message, "error");
+  }
 }
 
 /** Run a sign-in/up action and show its result. Returns true on success. */
@@ -318,7 +356,7 @@ function handleAuthRedirect() {
   } else if (params.get("type") === "recovery" && params.get("access_token")) {
     resetToken = params.get("access_token");
     selectTab("grade");
-    showAuthForm("reset");
+    openPasswordDialog("reset");
   } else if (params.get("type") === "signup" || params.get("type") === "email") {
     selectTab("grade");
     setAlert(msg, "Your email is confirmed. You can sign in now.", "ok");
@@ -358,11 +396,18 @@ function renderGrade(state) {
 
   $$(".ttl").forEach((n) => { n.textContent = state.expires_minutes; });
   $("#exam-title").textContent = state.exam
-    ? `${state.exam.class_name} — ${state.exam.exam_name}` : "New grading session";
+    ? `${state.exam.class_name} — ${state.exam.exam_name}` : "New exam";
+
+  // Bubbles next to each step fill in as the step is completed.
+  const graded = state.students.filter((s) => s.bubble_page_read).length;
+  $("#step-key").classList.toggle("done", Boolean(state.key));
+  $("#step-upload").classList.toggle("done", graded > 0 && state.done);
+  $("#step-review").classList.toggle("done", state.done && state.flags.every((f) => f.resolved));
+  $("#step-results").classList.toggle("done", state.done);
 
   // Step 1: key
   $("#key-status").textContent = state.key
-    ? `✔ Key loaded from ${state.key.source} (${state.key.num_questions} questions)` : "No key yet";
+    ? `Loaded from ${state.key.source} · ${state.key.num_questions} questions` : "No key loaded yet";
   $("#key-file").disabled = state.students.length > 0;
 
   // Step 2: uploads, locked until there is a key
@@ -427,7 +472,7 @@ function setupGrading() {
     try {
       renderGrade(await api("/api/grade/key", { method: "POST", form }));
     } catch (err) {
-      $("#key-status").textContent = gradeState?.key ? "" : "No key yet";
+      $("#key-status").textContent = gradeState?.key ? "" : "No key loaded yet";
       setAlert(errBox, err.message, "error");
     }
   });
@@ -465,7 +510,7 @@ async function uploadFiles(files) {
   doneBtn.disabled = true;
   for (const file of files) {
     const status = el("span", { class: "status" }, "reading…");
-    log.prepend(el("li", {}, file.name, " — ", status));
+    log.prepend(el("li", {}, el("span", { class: "fname" }, file.name), status));
     const form = new FormData();
     form.append("file", file);
     try {
@@ -527,9 +572,11 @@ function renderFlags(state) {
     }));
     list.append(el("div", { class: "flag" + (f.resolved ? " resolved" : "") },
       el("div", {},
-        el("div", {}, el("strong", {}, `${f.student} — Question ${f.question}`),
-          f.resolved ? el("span", { class: "muted" }, "  ✔ checked") : null),
-        el("div", { class: "muted small" }, f.description +
+        el("div", {}, el("span", { class: "flag-title" }, f.student),
+          el("span", { class: "flag-q" }, `Q${f.question}`), " ",
+          f.resolved ? el("span", { class: "tag checked" }, "checked")
+                     : el("span", { class: "tag" }, "check")),
+        el("div", { class: "flag-note" }, f.description +
           (f.detected ? ` Scanner read: ${f.detected}.` : " Scanner read: blank.") +
           (f.multi_correct ? " (This question has more than one correct answer.)" : "")),
         el("img", { src: `/api/grade/snippet/${f.student_index}/${f.question}.png`,
@@ -537,7 +584,7 @@ function renderFlags(state) {
       el("div", {},
         el("div", { class: "choices", role: "group", "aria-label": "Student's answer" }, buttons),
         el("div", { class: "row" }, confirmBtn,
-          el("span", { class: "muted small" }, "No letters selected = blank"))),
+          el("span", { class: "hint" }, "Leave all empty for a blank answer"))),
     ));
   }
 }
@@ -563,7 +610,7 @@ function renderResults(state) {
       el("td", {}, s.score === null ? "—" : `${s.score} / ${s.possible}`),
       el("td", {}, s.percent === null ? "—" : `${s.percent}%`),
       s.written.map((w) => el("td", {}, writtenInput(s, w))),
-      el("td", {}, notes.length ? el("span", { class: "badge" }, notes.join(", ")) : ""));
+      el("td", {}, notes.length ? el("span", { class: "tag" }, notes.join(", ")) : ""));
   });
   table.replaceChildren(el("thead", {}, head), el("tbody", {}, rows));
 
