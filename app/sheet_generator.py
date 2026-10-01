@@ -144,6 +144,17 @@ def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0) -> N
         c.setFillGray(BUBBLE_LETTER_GRAY)
         c.drawCentredString(b.x, _flip(b.y) - letter_size * 0.35, "ABCDEFGHIJ"[b.choice])
 
+    # Open (non-MC) questions: an outlined box where the bubbles would be.
+    for box in page.open_boxes:
+        c.setStrokeGray(BUBBLE_OUTLINE_GRAY)
+        c.setLineWidth(0.8)
+        c.roundRect(box.x, _flip(box.y) - box.h / 2, box.w, box.h, box.h / 2, stroke=1, fill=0)
+        size = _fit_text(c, "open response", "Helvetica-Oblique", min(box.h * 0.62, 9),
+                         box.w - box.h)
+        c.setFont("Helvetica-Oblique", size)
+        c.setFillGray(0.45)
+        c.drawCentredString(box.x + box.w / 2, _flip(box.y) - size * 0.35, "open response")
+
     c.setFillGray(0)
     c.setStrokeGray(0)
     for w in page.written:

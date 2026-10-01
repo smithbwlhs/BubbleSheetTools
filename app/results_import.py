@@ -10,6 +10,9 @@ Expected layout (see export.results_csv):
     ANSWER KEY V2, ..., D, B, A, ...
     Ada Lovelace, Bio P3, 1, 3f9c01ab-01, ..., B, A?, D, ...
 
+Open-response questions appear as "Qn (open)" columns holding the teacher's
+score; the ANSWER KEY row has "open" there.
+
 Rows are found by their first cell, not their position, so a file that was
 opened in Excel, sorted or trimmed still loads. Score columns are ignored and
 recalculated. Older results files without the Class / Sheet ID columns or the
@@ -39,6 +42,7 @@ class ImportedStudent:
     answers: dict[int, frozenset[int]] | None  # None = bubble page never scanned
     uncertain: set[int]                         # answers marked "?" (still to check)
     written: dict[int, float | None]
+    open_scores: dict[int, float | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -51,6 +55,7 @@ class ImportedResults:
     keys: dict[int, dict[int, frozenset[int]]]  # version -> question -> correct choices
     num_versions: int
     exam_ids: set[str]
+    open_questions: list[int] = field(default_factory=list)
     students: list[ImportedStudent] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -101,12 +106,14 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
     col = {h.lower(): i for i, h in enumerate(header)}
     q_cols = {int(m.group(1)): i for i, h in enumerate(header)
               if (m := re.fullmatch(r"Q(\d+)", h, re.IGNORECASE))}
+    open_cols = {int(m.group(1)): i for i, h in enumerate(header)
+                 if (m := re.fullmatch(r"Q(\d+)\s*\(open\)", h, re.IGNORECASE))}
     w_cols = {int(m.group(1)): i for i, h in enumerate(header)
               if (m := re.fullmatch(r"Written (\d+)", h, re.IGNORECASE))}
     if not q_cols:
         raise AnswerKeyError(f"{filename} has no question columns (Q1, Q2, ...).")
-    num_q = max(q_cols)
-    if sorted(q_cols) != list(range(1, num_q + 1)) or num_q > MAX_QUESTIONS:
+    num_q = max(set(q_cols) | set(open_cols))
+    if sorted(set(q_cols) | set(open_cols)) != list(range(1, num_q + 1)) or num_q > MAX_QUESTIONS:
         raise AnswerKeyError(f"{filename}: the question columns should run Q1 to Q{num_q} "
                              "with none missing.")
 
@@ -181,6 +188,8 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
             name=name[:60], class_name=cell(r, class_i)[:60], exam_id=exam_id,
             roster_index=roster, version=version, answers=answers, uncertain=uncertain,
             written={n: _number(cell(r, i), f"{where}, Written {n}") for n, i in w_cols.items()},
+            open_scores={q: _number(cell(r, i), f"{where}, Q{q} (open)")
+                         for q, i in open_cols.items()},
         ))
     if not students:
         raise AnswerKeyError(f"{filename} has no student rows.")
@@ -217,5 +226,6 @@ def parse_results_csv(filename: str, text: str) -> ImportedResults:
         exam_name=exam_name[:60], num_questions=num_q, num_choices=num_choices,
         written_heights=heights, multi_mode=mode if mode in ("all", "any") else "all",
         keys=keys, num_versions=num_versions, exam_ids=exam_ids, students=students,
+        open_questions=sorted(open_cols),
         warnings=warnings,
     )

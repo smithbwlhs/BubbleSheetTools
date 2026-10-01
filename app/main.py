@@ -19,7 +19,7 @@ Routes
     POST /api/grade/upload      upload one file of student sheets
     POST /api/grade/done        teacher is finished uploading
     POST /api/grade/resolve     teacher's answer for a flagged question
-    POST /api/grade/written     score for a hand-graded written response
+    POST /api/grade/written     score for a hand-graded written response or open question
     POST /api/grade/settings    scoring mode for multi-answer questions
     GET  /api/grade/snippet/{student}/{question}.png   image of a flagged row
     GET  /api/grade/export/{name}                      CSV / PNG / ZIP downloads
@@ -41,7 +41,7 @@ from .config import settings
 from .grading import GradingSession, letters
 from .roster import RosterError, parse_csv, parse_pasted
 from .sheet_generator import generate_sheets_pdf
-from .sheet_layout import ExamSpec, LayoutError, max_written_height_in
+from .sheet_layout import ExamSpec, LayoutError, max_written_height_in, parse_question_list
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bubblesheettools")
@@ -106,6 +106,7 @@ class SheetsIn(BaseModel):
     num_choices: int = 4
     written_heights: list[float] = Field(default_factory=list, max_length=50)
     num_versions: int = 1
+    open_questions: str = Field("", max_length=400)  # e.g. "5, 12-14"
     names: list[str] = Field(default_factory=list, max_length=1000)
 
 
@@ -125,10 +126,11 @@ def make_sheets(body: SheetsIn):
         raise _bad("Add at least one student name before creating sheets.")
     try:
         names = parse_pasted("\n".join(names))  # same cleaning/limits as the roster step
+        open_qs = parse_question_list(body.open_questions, max(body.num_questions, 1))
         spec = ExamSpec(class_name=body.class_name.strip(), exam_name=body.exam_name.strip(),
                         num_questions=body.num_questions, num_choices=body.num_choices,
                         written_heights=tuple(round(h, 2) for h in body.written_heights),
-                        num_versions=body.num_versions)
+                        num_versions=body.num_versions, open_questions=open_qs)
         pdf = generate_sheets_pdf(spec, names)
     except (LayoutError, RosterError, ValueError) as exc:
         raise _bad(str(exc))
@@ -248,7 +250,7 @@ def _state(session: GradingSession) -> dict:
     """Everything the grading screen needs, as JSON."""
     spec = session.spec
     students, flags = [], []
-    total_q = session.num_questions
+    total_q = len(session.questions)  # multiple choice questions only
     for s in session.ordered_students():
         score = session.score(s)
         students.append({
@@ -258,6 +260,8 @@ def _state(session: GradingSession) -> dict:
             "bubble_page_read": s.answers is not None, "pages_seen": sorted(s.pages_seen),
             "open_flags": len(s.open_flags), "notes": s.notes,
             "written": [{"number": n, "score": v} for n, v in sorted(s.written_scores.items())],
+            "open": [{"question": q, "score": s.open_scores.get(q)}
+                     for q in session.open_questions],
         })
         for q, f in sorted(s.flags.items()):
             if q == 0:  # the version row: detected / answer are version numbers
@@ -279,8 +283,9 @@ def _state(session: GradingSession) -> dict:
         "keys": [{"version": v, "source": session.key_sources.get(v),
                   "loaded": v in session.keys} for v in session.versions],
         "ready": session.ready,
+        "open_questions": session.open_questions,
         "key": None if not session.keys else {
-            "num_questions": total_q,
+            "num_questions": session.num_questions, "num_mc": total_q,
             "multi_answer_questions": sorted({q for k in session.keys.values()
                                               for q, a in k.answers.items() if len(a) > 1}),
         },
@@ -377,14 +382,21 @@ def grade_resolve(body: ResolveIn, session: GradingSession = Depends(_session)):
 
 class WrittenIn(BaseModel):
     student_index: int
-    number: int
+    number: int | None = None    # a written response box, or ...
+    question: int | None = None  # ... an open-response question
     score: float | None = None
 
 
 @app.post("/api/grade/written")
 def grade_written(body: WrittenIn, session: GradingSession = Depends(_session)):
+    """Save a hand-entered score (written response box or open question)."""
     try:
-        session.set_written_score(body.student_index, body.number, body.score)
+        if body.question is not None:
+            session.set_open_score(body.student_index, body.question, body.score)
+        elif body.number is not None:
+            session.set_written_score(body.student_index, body.number, body.score)
+        else:
+            raise ValueError("Say which written response or open question this score is for.")
     except ValueError as exc:
         raise _bad(str(exc))
     return {"ok": True}

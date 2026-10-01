@@ -21,6 +21,12 @@ scanned sheets, and export the results as CSV files and PNG charts.
   CSV per version, or one CSV with `Question, Version 1, Version 2, ...` columns. Question
   analysis and the per-question charts are produced **per version**, so scrambled
   questions or choices don't matter.
+- **Open questions** (e.g. `5, 12-14`): graphing or free-response problems inside the
+  numbering. Their rows print an "open response" box where the bubbles would be, so
+  nothing can be bubbled there. The scanner skips them; the teacher types a score for each
+  in the results table (or in `results.csv` and re-uploads it). Open scores count toward
+  the total but not the multiple choice score, the question analysis or the charts. In a
+  CSV key, write `open` (or `-`) for these questions.
 - **Continue from a results CSV** (teacher account): re-upload a `results.csv` from
   earlier to regenerate the analysis (lost downloads), grade late students' sheets from the
   same print batch, or combine several periods that used the same answer key. A student

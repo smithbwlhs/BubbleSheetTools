@@ -14,6 +14,7 @@ Keys come from either:
         3,A;C       (";" "|" "/" or spaces also work)
         4,AC
         5,B,D       (extra cells are extra correct answers)
+        6,open      (an open-response question: not machine graded; "-" also works)
 """
 
 import csv
@@ -22,6 +23,10 @@ import re
 from dataclasses import dataclass
 
 from .sheet_layout import CHOICE_LETTERS, MAX_QUESTIONS
+
+
+# Answer-cell values meaning "open-response question, don't machine grade".
+OPEN_WORDS = {"open", "open response", "-", "--", "n/a", "na", "skip"}
 
 
 class AnswerKeyError(ValueError):
@@ -33,10 +38,12 @@ class AnswerKey:
     answers: dict[int, frozenset[int]]  # question number -> correct choice indexes
     num_choices: int | None = None      # known when read from a key sheet
     exam_id: str | None = None          # known when read from a key sheet
+    open_questions: frozenset[int] = frozenset()  # marked "open" (not machine graded)
 
     @property
     def num_questions(self) -> int:
-        return max(self.answers) if self.answers else 0
+        """Highest question number, counting open questions."""
+        return max(set(self.answers) | set(self.open_questions), default=0)
 
     def letters(self, question: int) -> str:
         """Correct answer(s) for a question as letters, e.g. "AC"."""
@@ -63,6 +70,7 @@ def parse_key_csv(text: str) -> AnswerKey:
         raise AnswerKeyError("The answer key file is empty.")
 
     answers: dict[int, frozenset[int]] = {}
+    open_qs: set[int] = set()
     for line_no, row in enumerate(csv.reader(io.StringIO(text)), start=1):
         cells = [c.strip() for c in row if c.strip()]
         if not cells:
@@ -75,8 +83,11 @@ def parse_key_csv(text: str) -> AnswerKey:
         q = int(q_text)
         if not 1 <= q <= MAX_QUESTIONS:
             raise AnswerKeyError(f"Line {line_no}: question {q} is out of range (1-{MAX_QUESTIONS}).")
-        if q in answers:
+        if q in answers or q in open_qs:
             raise AnswerKeyError(f"Line {line_no}: question {q} appears more than once.")
+        if " ".join(cells[1:]).strip().lower() in OPEN_WORDS:
+            open_qs.add(q)
+            continue
         try:
             answers[q] = _parse_choices(cells[1:])
         except AnswerKeyError as exc:
@@ -84,10 +95,13 @@ def parse_key_csv(text: str) -> AnswerKey:
 
     if not answers:
         raise AnswerKeyError("No answers were found in the answer key file.")
-    missing = [q for q in range(1, max(answers) + 1) if q not in answers]
+    last = max(set(answers) | open_qs)
+    missing = [q for q in range(1, last + 1) if q not in answers and q not in open_qs]
     if missing:
-        raise AnswerKeyError(f"The answer key is missing question(s): {', '.join(map(str, missing[:10]))}.")
-    return AnswerKey(answers=answers)
+        raise AnswerKeyError(
+            f"The answer key is missing question(s): {', '.join(map(str, missing[:10]))}. "
+            "Write 'open' for open-response questions.")
+    return AnswerKey(answers=answers, open_questions=frozenset(open_qs))
 
 
 def parse_versioned_key_csv(text: str) -> dict[int, AnswerKey] | None:

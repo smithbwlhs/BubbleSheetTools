@@ -199,6 +199,7 @@ async function createSheets(e) {
       num_choices: Number($("#num-choices").value),
       written_heights: $$("[data-written]").map((i) => Number(i.value)),
       num_versions: Number($("#num-versions").value),
+      open_questions: $("#open-questions").value.trim(),
       names: parsedNames,
     };
     const blob = await api("/api/sheets", { method: "POST", json: body, blob: true });
@@ -453,12 +454,16 @@ function renderKeys(state) {
   show($("#key-version-hint"), multi && !locked);
 
   const loaded = state.keys.filter((k) => k.loaded);
+  const nOpen = state.open_questions.length;
+  const counts = !state.key ? "" : nOpen
+    ? `${state.key.num_mc} multiple choice + ${nOpen} open`
+    : `${state.key.num_questions} questions`;
   $("#key-status").textContent = !state.key ? "No key loaded yet"
     : state.imported_files.length
-      ? `From results: ${state.imported_files.join(", ")} · ${state.key.num_questions} questions`
+      ? `From results: ${state.imported_files.join(", ")} · ${counts}`
       : multi
-        ? `${loaded.length} of ${state.num_versions} keys loaded · ${state.key.num_questions} questions`
-        : `Loaded from ${loaded[0].source} · ${state.key.num_questions} questions`;
+        ? `${loaded.length} of ${state.num_versions} keys loaded · ${counts}`
+        : `Loaded from ${loaded[0].source} · ${counts}`;
   // The keys can't change once students are graded against them.
   $("#key-file").disabled = locked;
   $("#key-file").closest("label").title = locked
@@ -702,7 +707,8 @@ function renderResults(state) {
   const showClass = new Set(state.students.map((s) => s.class_name)).size > 1;
   const showVersion = state.num_versions > 1;
   const head = el("tr", {}, el("th", {}, "Student"), showClass ? el("th", {}, "Class") : null,
-    showVersion ? el("th", {}, "Version") : null, el("th", {}, "Score"), el("th", {}, "%"),
+    showVersion ? el("th", {}, "Version") : null, el("th", {}, "MC score"), el("th", {}, "%"),
+    state.open_questions.map((q) => el("th", {}, `Q${q} (open)`)),
     Array.from({ length: nWritten }, (_, i) => el("th", {}, `Written ${i + 1}`)),
     el("th", {}, "Notes"));
   const rows = state.students.map((s) => {
@@ -716,7 +722,10 @@ function renderResults(state) {
       showVersion ? el("td", {}, s.version ?? "?") : null,
       el("td", {}, s.score === null ? "—" : `${s.score} / ${s.possible}`),
       el("td", {}, s.percent === null ? "—" : `${s.percent}%`),
-      s.written.map((w) => el("td", {}, writtenInput(s, w))),
+      s.open.map((o) => el("td", {}, scoreInput(s, o, { question: o.question },
+                                                `open question ${o.question}`))),
+      s.written.map((w) => el("td", {}, scoreInput(s, w, { number: w.number },
+                                                   `written response ${w.number}`))),
       el("td", {}, notes.length ? el("span", { class: "tag" }, notes.join(", ")) : ""));
   });
   table.replaceChildren(el("thead", {}, head), el("tbody", {}, rows));
@@ -757,14 +766,18 @@ function renderDownloads(state) {
   $("#charts").replaceChildren(...nodes);
 }
 
-function writtenInput(student, w) {
-  const input = el("input", { type: "number", min: "0", step: "0.5", value: w.score ?? "",
-    "aria-label": `${student.name} written response ${w.number} score` });
+/**
+ * A hand-entered score box (written response box or open question).
+ * `target` is {number: n} or {question: q}; saved as soon as it changes.
+ */
+function scoreInput(student, item, target, label) {
+  const input = el("input", { type: "number", min: "0", step: "0.5", value: item.score ?? "",
+    "aria-label": `${student.name} ${label} score` });
   input.addEventListener("change", () => handleApiError(async () => {
     const v = input.value.trim();
     await api("/api/grade/written", { method: "POST", json: {
-      student_index: student.index, number: w.number, score: v === "" ? null : Number(v) } });
-    w.score = v === "" ? null : Number(v);
+      student_index: student.index, ...target, score: v === "" ? null : Number(v) } });
+    item.score = v === "" ? null : Number(v);
   }));
   return input;
 }

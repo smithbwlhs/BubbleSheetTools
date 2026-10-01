@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from .grading import GradingSession, StudentResult, letters  # noqa: E402
-from .sheet_layout import CHOICE_LETTERS  # noqa: E402
+from .sheet_layout import CHOICE_LETTERS, format_question_list  # noqa: E402
 
 # ---- chart styling (light surface; PNGs are usually printed or pasted) ----
 SURFACE = "#ffffff"
@@ -120,58 +120,76 @@ def _csv_bytes(rows: list[list]) -> bytes:
 
 def results_csv(session: GradingSession) -> bytes:
     """One row per student. Also re-uploadable (see results_import.py), so it
-    records the exam details in an EXAM INFO row and each student's sheet ID."""
+    records the exam details in an EXAM INFO row and each student's sheet ID.
+
+    Question columns run Q1..Qn in order. Multiple choice columns hold the
+    student's letters; open questions are "Qn (open)" columns holding the
+    teacher's score for that question.
+    """
     spec = session.spec
-    questions = session.questions
-    total_q = len(questions)
+    mc = session.questions
+    open_qs = set(session.open_questions)
+    all_q = list(range(1, session.num_questions + 1))
     n_written = len(spec.written_heights)
     multi = session.num_versions > 1
+    hand_scored = bool(n_written or open_qs)
+    total_col = ("Total (MC + open + written)" if open_qs and n_written
+                 else "Total (MC + open)" if open_qs else "Total (MC + written)")
     written_cols = [f"Written {n}" for n in range(1, n_written + 1)]
+    q_cols = [f"Q{q} (open)" if q in open_qs else f"Q{q}" for q in all_q]
     header = (["Student", "Class"] + (["Version"] if multi else [])
               + ["Sheet ID", "MC correct", "MC possible", "MC percent"]
-              + written_cols + (["Total (MC + written)"] if n_written else [])
-              + ["Needs review", "Notes"] + [f"Q{q}" for q in questions])
+              + written_cols + ([total_col] if hand_scored else [])
+              + ["Needs review", "Notes"] + q_cols)
 
-    def row(values: dict, answers: list[str]) -> list:
-        """Place named values under their header columns, then the answers."""
-        return [values.get(h, "") for h in header[:-total_q]] + answers
+    def row(values: dict, per_question: dict[int, object]) -> list:
+        """Place named values under their header columns, then one cell per question."""
+        return ([values.get(h, "") for h in header[:-len(all_q)]]
+                + [per_question.get(q, "") for q in all_q])
+
+    def num(value):
+        return "" if value is None else value
 
     rows = [header]
     rows.append(row({"Student": "EXAM INFO", "Class": f"exam={spec.exam_name}",
-                     "Sheet ID": f"questions={total_q}", "MC correct": f"choices={spec.num_choices}",
+                     "Sheet ID": f"questions={len(all_q)}",
+                     "MC correct": f"choices={spec.num_choices}",
                      "MC possible": "written=" + ";".join(f"{h:g}" for h in spec.written_heights),
                      "MC percent": f"scoring={session.multi_mode}",
                      "Needs review": "ids=" + ";".join(sorted(session.exam_ids)),
                      "Notes": f"versions={session.num_versions}"},
-                    [""] * total_q))
+                    {1: "open=" + format_question_list(open_qs)} if open_qs else {}))
     for v in session.versions:
+        key = session.keys[v]
         rows.append(row({"Student": f"ANSWER KEY V{v}" if multi else "ANSWER KEY",
-                         "Version": v, "MC correct": total_q, "MC possible": total_q,
+                         "Version": v, "MC correct": len(mc), "MC possible": len(mc),
                          "MC percent": 100.0},
-                        [letters(session.keys[v].answers[q]) for q in questions]))
+                        {q: "open" if q in open_qs else letters(key.answers[q]) for q in all_q}))
 
     for s in session.ordered_students():
         base = {"Student": s.name, "Class": s.class_name, "Sheet ID": s.sheet_id,
                 "Version": s.version if s.version else "?",
-                "MC possible": total_q, "Notes": "; ".join(s.notes)}
+                "MC possible": len(mc), "Notes": "; ".join(s.notes)}
+        open_cells = {q: num(s.open_scores.get(q)) for q in open_qs}
         if s.answers is None:
             rows.append(row({**base, "Version": "", "Needs review": "Bubble page not scanned"},
-                            [""] * total_q))
+                            open_cells))
             continue
         correct = session.score(s)  # None while the version is unknown
         written = {f"Written {n}": s.written_scores.get(n) for n in range(1, n_written + 1)}
         open_flags = sorted(f.question for f in s.open_flags)
         review = ["Version" if q == 0 else f"Q{q}" for q in open_flags]
-        values = {**base, **{k: ("" if v is None else v) for k, v in written.items()},
+        values = {**base, **{k: num(v) for k, v in written.items()},
                   "Needs review": ", ".join(review)}
         if correct is not None:
+            hand = [w for w in written.values() if w is not None]
+            hand += [v for v in s.open_scores.values() if v is not None]
             values.update({"MC correct": correct,
-                           "MC percent": round(100 * correct / total_q, 1),
-                           "Total (MC + written)":
-                               correct + sum(w for w in written.values() if w is not None)})
-        answers = [letters(s.answers.get(q, frozenset())) + ("?" if q in open_flags else "")
-                   for q in questions]
-        rows.append(row(values, answers))
+                           "MC percent": round(100 * correct / len(mc), 1),
+                           total_col: correct + sum(hand)})
+        answers = {q: letters(s.answers.get(q, frozenset())) + ("?" if q in open_flags else "")
+                   for q in mc}
+        rows.append(row(values, {**answers, **open_cells}))
     return _csv_bytes(rows)
 
 
@@ -219,10 +237,15 @@ def _title(session: GradingSession, what: str, version: int | None = None,
     return f"{what}\n{prefix}{session.spec.exam_name}"
 
 
+def percent_scores(session: GradingSession) -> list[float]:
+    """Each scored student's multiple choice percentage (open questions are hand-scored
+    and not part of it)."""
+    total_q = len(session.questions)
+    return [100 * session.score(s) / total_q for s in graded_students(session)]
+
+
 def score_distribution_png(session: GradingSession) -> bytes:
-    students = graded_students(session)
-    total_q = session.num_questions
-    pcts = [100 * session.score(s) / total_q for s in students]
+    pcts = percent_scores(session)
     bins = list(range(0, 101, 10))
     counts = [0] * 10
     for p in pcts:

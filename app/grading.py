@@ -19,7 +19,9 @@ from .results_import import ImportedResults, parse_results_csv
 from .scanner.align import AlignError, locate_page
 from .scanner.bubbles import QuestionRead, read_bubbles, row_snippet_png
 from .scanner.loader import UploadError, load_pages
-from .sheet_layout import CHOICE_LETTERS, MAX_VERSIONS, ExamSpec, build_layout, decode_qr
+from .sheet_layout import (
+    CHOICE_LETTERS, MAX_VERSIONS, ExamSpec, build_layout, decode_qr, format_question_list,
+)
 
 MULTI_MODES = ("all", "any")  # how questions with several correct answers are scored
 VERSION_QUESTION = 0          # flags / reads keyed 0 are about the version row
@@ -89,6 +91,7 @@ class StudentResult:
     answers: dict[int, frozenset[int]] | None = None  # None until page 1 is scanned
     flags: dict[int, Flag] = field(default_factory=dict)
     written_scores: dict[int, float | None] = field(default_factory=dict)
+    open_scores: dict[int, float | None] = field(default_factory=dict)  # by question number
     pages_seen: set[int] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)   # e.g. "rescanned", "late scan"
 
@@ -152,11 +155,23 @@ class GradingSession:
 
     @property
     def num_questions(self) -> int:
+        """All numbered questions on the sheet, multiple choice and open."""
+        if self.spec:
+            return self.spec.num_questions
         return next(iter(self.keys.values())).num_questions if self.keys else 0
 
     @property
+    def open_questions(self) -> list[int]:
+        """Open-response questions: hand-scored, not part of the MC score."""
+        if self.spec:
+            return list(self.spec.open_questions)
+        return sorted(next(iter(self.keys.values())).open_questions) if self.keys else []
+
+    @property
     def questions(self) -> list[int]:
-        return list(range(1, self.num_questions + 1))
+        """Multiple choice question numbers (the ones the scanner grades)."""
+        open_set = set(self.open_questions)
+        return [q for q in range(1, self.num_questions + 1) if q not in open_set]
 
     def key_for(self, version: int | None) -> AnswerKey | None:
         return self.keys.get(version) if version else None
@@ -218,6 +233,12 @@ class GradingSession:
                     raise AnswerKeyError(
                         f"This key has {key.num_questions} questions but the key already "
                         f"loaded has {others[0].num_questions}. All versions must match.")
+                expected = (set(self.spec.open_questions) if self.spec and self.exam_ids
+                            else set(others[0].open_questions) if others else None)
+                if expected is not None and set(key.open_questions) != expected:
+                    raise AnswerKeyError(
+                        f"This key marks question(s) {_qlist(key.open_questions) or 'none'} as "
+                        f"open, but the exam's open questions are {_qlist(expected) or 'none'}.")
             for v, key in found.items():
                 self.keys[v], self.key_sources[v] = key, filename
             self.touch()
@@ -284,6 +305,7 @@ class GradingSession:
                 student.version = row.version
                 student.answers = dict(row.answers) if row.answers is not None else None
                 student.written_scores = dict(row.written)
+                student.open_scores = dict(row.open_scores)
                 student.pages_seen = {1} if row.answers is not None else set()
                 student.flags = {
                     q: Flag(q, "csv", student.answers.get(q, frozenset()), b"")
@@ -301,7 +323,8 @@ class GradingSession:
     def _merge_exam(self, imported: ImportedResults, filename: str) -> None:
         """Adopt the imported key(s)/exam, or check they match those loaded."""
         if not self.keys:
-            self.keys = {v: AnswerKey(answers=dict(a), num_choices=imported.num_choices)
+            self.keys = {v: AnswerKey(answers=dict(a), num_choices=imported.num_choices,
+                                      open_questions=frozenset(imported.open_questions))
                          for v, a in imported.keys.items()}
             self.key_sources = {v: filename for v in imported.keys}
             self.num_versions = imported.num_versions
@@ -311,7 +334,8 @@ class GradingSession:
                 num_questions=imported.num_questions, num_choices=imported.num_choices,
                 written_heights=imported.written_heights,
                 exam_id=min(imported.exam_ids, default="restored"),
-                num_versions=imported.num_versions)
+                num_versions=imported.num_versions,
+                open_questions=tuple(imported.open_questions))
             self.multi_mode = imported.multi_mode
         else:
             mine = {v: dict(k.answers) for v, k in self.keys.items()}
@@ -319,6 +343,9 @@ class GradingSession:
                 raise AnswerKeyError(
                     f"{filename} has a different answer key from the results already loaded, "
                     "so it can't be combined with them.")
+            if set(self.open_questions) != set(imported.open_questions):
+                raise AnswerKeyError(
+                    f"{filename} has different open questions from the results already loaded.")
             if len(self.spec.written_heights) != len(imported.written_heights):
                 raise AnswerKeyError(
                     f"{filename} has a different number of written responses from the "
@@ -384,7 +411,8 @@ class GradingSession:
                 student = self._add_student(
                     name=who.student_name, class_name=spec.class_name, exam_id=spec.exam_id,
                     roster_index=who.student_index,
-                    written_scores={n: None for n in range(1, len(spec.written_heights) + 1)})
+                    written_scores={n: None for n in range(1, len(spec.written_heights) + 1)},
+                    open_scores={q: None for q in spec.open_questions})
                 if self.imported_files:
                     student.add_note("late scan")
             elif not student.exam_id:
@@ -437,6 +465,11 @@ class GradingSession:
             if too_high:
                 raise PageProblem(
                     f"The answer key uses choices this sheet doesn't have (question {too_high[0]}).")
+            key_open = set(next(iter(self.keys.values())).open_questions)
+            if key_open != set(spec.open_questions):
+                raise PageProblem(
+                    f"The answer key's open questions ({_qlist(key_open) or 'none'}) don't "
+                    f"match this sheet's ({_qlist(spec.open_questions) or 'none'}).")
             if spec.num_versions != self.num_versions:
                 raise PageProblem(
                     f"This sheet is for an exam with {spec.num_versions} version(s), but "
@@ -490,6 +523,17 @@ class GradingSession:
             student.written_scores[number] = score
             self.touch()
 
+    def set_open_score(self, student_id: int, question: int, score: float | None) -> None:
+        """Teacher's score for an open-response question."""
+        with self.lock:
+            student = self._student(student_id)
+            if question not in self.open_questions:
+                raise ValueError(f"Question {question} is not an open question on this exam.")
+            if score is not None and not 0 <= score <= 1000:
+                raise ValueError("Scores must be between 0 and 1000.")
+            student.open_scores[question] = score
+            self.touch()
+
     def set_multi_mode(self, mode: str) -> None:
         if mode not in MULTI_MODES:
             raise ValueError("Unknown scoring mode.")
@@ -528,6 +572,10 @@ class PageProblem(Exception):
     def __init__(self, message: str, level: str = "error"):
         super().__init__(message)
         self.level = level
+
+
+def _qlist(questions) -> str:
+    return format_question_list(questions)
 
 
 def _read_version(read: QuestionRead) -> tuple[int | None, str | None]:
@@ -582,7 +630,8 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
                 f"{label} could not be read reliably: " + "; ".join(parts) +
                 ". Darken or clean up those bubbles and re-scan, or upload a CSV key instead.")
         keys[version] = AnswerKey(answers={q: r.marked for q, r in reads.items()},
-                                  num_choices=spec.num_choices, exam_id=spec.exam_id)
+                                  num_choices=spec.num_choices, exam_id=spec.exam_id,
+                                  open_questions=frozenset(spec.open_questions))
         spec_found = spec
 
     if keys:

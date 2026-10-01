@@ -86,6 +86,15 @@ class ExamSpec:
     written_heights: tuple[float, ...] = ()  # height of each box, inches
     exam_id: str = field(default_factory=lambda: secrets.token_hex(4))
     num_versions: int = 1  # 2-4 adds a "Version" bubble row to student sheets
+    # Question numbers that are not multiple choice (graphing, free response...).
+    # They print an "open response" box instead of bubbles and are hand-scored.
+    open_questions: tuple[int, ...] = ()
+
+    @property
+    def mc_questions(self) -> list[int]:
+        """Question numbers graded by the scanner (everything not open)."""
+        open_set = set(self.open_questions)
+        return [q for q in range(1, self.num_questions + 1) if q not in open_set]
 
     def validate(self) -> None:
         if not self.class_name.strip():
@@ -102,6 +111,11 @@ class ExamSpec:
             raise LayoutError(
                 f"Answer choices per question must be between {MIN_CHOICES} and {MAX_CHOICES}."
             )
+        bad = [q for q in self.open_questions if not 1 <= q <= self.num_questions]
+        if bad:
+            raise LayoutError(f"Open question {bad[0]} is not between 1 and {self.num_questions}.")
+        if not self.mc_questions:
+            raise LayoutError("At least one question must be multiple choice.")
         if not 1 <= self.num_versions <= MAX_VERSIONS:
             raise LayoutError(f"Number of exam versions must be between 1 and {MAX_VERSIONS}.")
         if len(self.written_heights) > MAX_WRITTEN:
@@ -125,6 +139,42 @@ class SheetIdentity:
     version: int = 0   # key sheets: which version they are the key for (students bubble theirs)
 
 
+# ------------------------------------------------ question number lists ----
+
+def parse_question_list(text: str, max_question: int = MAX_QUESTIONS) -> tuple[int, ...]:
+    """"5, 12-14, 21" -> (5, 12, 13, 14, 21). Raises LayoutError on bad input."""
+    out: set[int] = set()
+    for part in (text or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, sep, hi = part.partition("-")
+        try:
+            a = int(lo)
+            b = int(hi) if sep else a
+        except ValueError:
+            raise LayoutError(f"'{part}' is not a question number or range like 12-14.") from None
+        if a > b:
+            a, b = b, a
+        if a < 1 or b > max_question:
+            raise LayoutError(f"Open questions must be between 1 and {max_question} ('{part}').")
+        out.update(range(a, b + 1))
+    return tuple(sorted(out))
+
+
+def format_question_list(questions) -> str:
+    """(5, 12, 13, 14) -> "5,12-14" (compact form used in QR codes and CSVs)."""
+    qs = sorted(set(questions))
+    parts, i = [], 0
+    while i < len(qs):
+        j = i
+        while j + 1 < len(qs) and qs[j + 1] == qs[j] + 1:
+            j += 1
+        parts.append(str(qs[i]) if i == j else f"{qs[i]}-{qs[j]}")
+        i = j + 1
+    return ",".join(parts)
+
+
 # ------------------------------------------------------------ QR codes ----
 
 def encode_qr(spec: ExamSpec, who: SheetIdentity, page: int) -> str:
@@ -145,6 +195,8 @@ def encode_qr(spec: ExamSpec, who: SheetIdentity, page: int) -> str:
     # Only multi-version exams carry version fields, keeping QR codes small.
     if spec.num_versions > 1:
         payload["vn"] = spec.num_versions
+    if spec.open_questions:
+        payload["o"] = format_question_list(spec.open_questions)  # e.g. "5,12-14"
     if who.version:
         payload["vv"] = who.version
     return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
@@ -164,6 +216,7 @@ def decode_qr(text: str) -> tuple[ExamSpec, SheetIdentity, int]:
             written_heights=tuple(float(h) for h in d.get("w", [])),
             exam_id=str(d["x"]),
             num_versions=int(d.get("vn", 1)),
+            open_questions=parse_question_list(str(d.get("o", ""))),
         )
         who = SheetIdentity(kind=str(d["t"]), student_name=str(d["n"]),
                             student_index=int(d["i"]), version=int(d.get("vv", 0)))
@@ -201,6 +254,16 @@ class ColumnHeader:
 
 
 @dataclass(frozen=True)
+class OpenBox:
+    """Placeholder printed instead of bubbles for an open (non-MC) question."""
+    question: int
+    x: float  # left edge
+    y: float  # vertical centre
+    w: float
+    h: float
+
+
+@dataclass(frozen=True)
 class WrittenBox:
     number: int  # 1-based written response number
     x: float
@@ -220,6 +283,7 @@ class PageLayout:
     labels: list[QuestionLabel] = field(default_factory=list)
     headers: list[ColumnHeader] = field(default_factory=list)
     written: list[WrittenBox] = field(default_factory=list)
+    open_boxes: list[OpenBox] = field(default_factory=list)
 
 
 def max_written_height_in() -> float:
@@ -259,6 +323,7 @@ def build_layout(spec: ExamSpec) -> list[PageLayout]:
     row_pitch = min(MAX_ROW_PITCH, grid_h / rows)
     bubble_pitch = min(MAX_BUBBLE_PITCH, (col_w - QUESTION_LABEL_W - 12) / spec.num_choices)
     radius = min(row_pitch, bubble_pitch) * 0.38
+    open_set = set(spec.open_questions)
 
     for col in range(cols):
         col_x = CONTENT_LEFT + col * col_w
@@ -274,6 +339,12 @@ def build_layout(spec: ExamSpec) -> list[PageLayout]:
                 break
             y = grid_top + COLUMN_HEADER_H + row_pitch * (row + 0.5)
             page.labels.append(QuestionLabel(q, col_x + QUESTION_LABEL_W, y))
+            if q in open_set:
+                # Same footprint as this row's bubbles, so the grid stays aligned.
+                left = first_bubble_x - radius
+                right = first_bubble_x + (spec.num_choices - 1) * bubble_pitch + radius
+                page.open_boxes.append(OpenBox(q, left, y, right - left, 2 * radius))
+                continue
             for c in range(spec.num_choices):
                 page.bubbles.append(Bubble(q, c, first_bubble_x + c * bubble_pitch, y, radius))
     cursor_y = grid_top + COLUMN_HEADER_H + row_pitch * rows + WRITTEN_GAP * 2

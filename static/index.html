@@ -44,9 +44,9 @@
           <div class="grid2">
             <label>Class name <input id="class-name" maxlength="60" required placeholder="Biology, Period 3"></label>
             <label>Exam name <input id="exam-name" maxlength="60" required placeholder="Unit 4 Test"></label>
-            <label>Multiple choice questions
+            <label>Number of questions
               <input id="num-questions" type="number" min="1" max="100" value="20" required>
-              <span class="hint">1 to 100</span></label>
+              <span class="hint">1 to 100, counting any open questions</span></label>
             <label>Answer choices per question
               <select id="num-choices"></select></label>
             <label>Exam versions
@@ -58,6 +58,10 @@
               </select>
               <span class="hint">With 2 or more, students bubble their version number, and you
                 get an answer key sheet for each version.</span></label>
+            <label>Open (not multiple choice) questions
+              <input id="open-questions" maxlength="400" placeholder="e.g. 5, 12-14">
+              <span class="hint">Graphing or free-response problems in the numbering. They print
+                an &ldquo;open response&rdquo; box instead of bubbles and are scored by hand.</span></label>
           </div>
           <div class="subsection">
             <label class="inline">Written response boxes
