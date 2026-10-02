@@ -546,14 +546,14 @@ function renderKeys(state) {
     k.loaded ? el("span", {}, `✔ ${k.source}`) : el("span", { class: "missing" }, "missing"))));
   show(list, multi);
 
-  // Which version a plain CSV key is for: default to the first one still missing.
+  // "Key is for": All versions (default; each file says which versions it holds)
+  // or one specific version. Keep the teacher's choice across re-renders.
   const pick = $("#key-version");
-  const previous = pick.value;
-  pick.replaceChildren(...state.keys.map((k) =>
-    el("option", { value: k.version }, `Version ${k.version}${k.loaded ? " (replace)" : ""}`)));
-  const firstMissing = state.keys.find((k) => !k.loaded);
-  pick.value = firstMissing ? String(firstMissing.version)
-    : (state.keys.some((k) => String(k.version) === previous) ? previous : "1");
+  const previous = pick.value || "all";
+  pick.replaceChildren(el("option", { value: "all" }, "All versions"),
+    ...state.keys.map((k) =>
+      el("option", { value: k.version }, `Version ${k.version}${k.loaded ? " (replace)" : ""}`)));
+  pick.value = [...pick.options].some((o) => o.value === previous) ? previous : "all";
   show($("#key-version-box"), multi && !locked);
   show($("#key-version-hint"), multi && !locked);
 
@@ -669,39 +669,26 @@ function versionFromName(name) {
 
 /**
  * Upload one or more answer key files (PDFs, photos, CSVs), one at a time.
- * Key sheets identify their own version. A plain CSV goes to the version in its
- * file name, else to the version picked in the menu, then the next missing ones.
+ * "Key is for: All versions" lets each file say which versions it holds (key
+ * sheets via their QR codes, CSVs via Version columns or a version in the file
+ * name). Choosing one version applies every file to that version only.
  */
 async function uploadKeys(files) {
   const errBox = $("#key-error");
   setAlert(errBox, "");
   const isCsv = (f) => /\.(csv|txt)$/i.test(f.name);
   const multi = gradeState && gradeState.num_versions > 1;
-
-  // Work out each plain CSV's version before uploading anything: named ones
-  // first, then the rest fill the picked version and the other missing ones.
-  const csvVersion = new Map();
-  for (const f of files.filter(isCsv)) {
-    const v = versionFromName(f.name);
-    if (v) csvVersion.set(f, v);
-  }
-  const taken = new Set(csvVersion.values());
-  const picked = Number($("#key-version").value) || 1;
-  const missing = (gradeState?.keys || []).filter((k) => !k.loaded).map((k) => k.version);
-  const slots = [picked, ...missing.filter((v) => v !== picked)].filter((v) => !taken.has(v));
+  const picked = $("#key-version").value;  // "all" or a version number
   const problems = [];
-  files.filter((f) => isCsv(f) && !csvVersion.has(f)).forEach((f, i) => {
-    if (i < slots.length) csvVersion.set(f, slots[i]);
-    else problems.push(`${f.name}: every version already has a key. Name the file with its ` +
-                       "version (e.g. key_v2.csv) to replace one.");
-  });
 
   for (const [i, file] of files.entries()) {
-    if (isCsv(file) && multi && !csvVersion.has(file)) continue;
     $("#key-status").textContent = `Reading ${file.name} (${i + 1} of ${files.length})…`;
     const form = new FormData();
     form.append("file", file);
-    if (multi && isCsv(file)) form.append("version", csvVersion.get(file));
+    const version = !multi ? null
+      : picked !== "all" ? Number(picked)
+        : isCsv(file) ? versionFromName(file.name) : null;
+    if (version) form.append("version", version);
     try {
       renderGrade(await api("/api/grade/key", { method: "POST", form }));
     } catch (err) {

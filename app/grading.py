@@ -193,10 +193,14 @@ class GradingSession:
     def set_key_from_upload(self, filename: str, data: bytes, version: int | None = None) -> list[int]:
         """Load answer key(s) from a CSV or scanned key sheet(s).
 
-        * Scanned key sheets say which version they are (QR code); several can
-          be in one PDF.
-        * A CSV with "Version 1, Version 2, ..." columns sets every version.
-        * Any other CSV is the key for `version` (chosen on the page; default 1).
+        `version` is the page's "Key is for" choice: None means "All versions".
+        * Key sheets say which version they are (QR code); one PDF can hold
+          several. With a version chosen, only that version's sheet is used.
+        * A CSV with "Version 1, Version 2, ..." columns sets every version
+          (or just the chosen one).
+        * Any other CSV is one key: for the chosen version, or version 1 on a
+          single-version exam. With "All versions" it can't be placed, so the
+          teacher is asked which version it is for.
         Returns the versions that were set.
         """
         if not data:
@@ -207,9 +211,18 @@ class GradingSession:
             found = parse_versioned_key_csv(text)
             has_version_columns = found is not None
             if found is None:
+                if version is None and self.num_versions > 1:
+                    raise AnswerKeyError(
+                        f"{filename} has one key, so choose which version it is for "
+                        "(\"Key is for\"), or name the file with its version, like key_v2.csv.")
                 found = {version or 1: parse_key_csv(text)}
         else:
             found, spec = _read_key_sheets(filename, data)
+
+        if version is not None:  # a specific version was chosen: keep only its key
+            if version not in found:
+                raise AnswerKeyError(f"{filename} has no key for version {version}.")
+            found = {version: found[version]}
 
         with self.lock:
             self._no_students_yet()

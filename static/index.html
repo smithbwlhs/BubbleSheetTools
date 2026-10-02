@@ -217,16 +217,16 @@
             <label class="file-btn solid">Choose answer key files
               <input id="key-file" type="file" multiple
                      accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.csv,.txt"></label>
-            <label id="key-version-box" class="inline" hidden>CSV key is for
+            <label id="key-version-box" class="inline" hidden>Key is for
               <select id="key-version"></select></label>
             <span id="key-status" class="hint"></span>
           </div>
-          <p id="key-version-hint" class="hint" hidden>You can choose several files at once: PDFs
-            or photos of key sheets (each one knows its own version, and one PDF can hold them
-            all), and CSVs. A CSV goes to the version in its file name (like
-            <code>key_v2.csv</code>), otherwise to the version picked above and then the next
-            missing ones. One CSV with <code>Question, Version 1, Version 2, &hellip;</code>
-            columns sets every version.</p>
+          <p id="key-version-hint" class="hint" hidden>You can choose several files at once.
+            With <strong>All versions</strong>, the sheets PDF (or a scan of the key sheets) loads
+            every version's key, since each key sheet knows its version, and so does a CSV with
+            <code>Question, Version 1, Version 2, &hellip;</code> columns. A CSV holding one key
+            goes to the version in its file name, like <code>key_v2.csv</code>. Pick a single
+            version to load (or replace) just that version's key.</p>
           <div class="subsection">
             <p class="hint">Or continue from earlier results: upload one or more
               <code>results.csv</code> files downloaded from this site. They must share the same

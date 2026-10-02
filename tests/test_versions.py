@@ -244,3 +244,23 @@ def test_mixed_key_files_for_four_versions():
     assert state["ready"] and [k["source"] for k in state["keys"]] == \
         ["keys_1_2.pdf", "keys_1_2.pdf", "v3.jpg", "key.csv"]
     client.post("/api/grade/clear")
+
+
+def test_key_is_for_all_versions_or_one(exam):
+    spec, pages, rng, key_pdf = exam  # key_pdf holds the v1 and v2 key sheets
+
+    # "All versions": a one-key CSV can't be placed without a version.
+    session = GradingSession(user_id="t")
+    session.set_num_versions(2)
+    with pytest.raises(AnswerKeyError, match="choose which version"):
+        session.set_key_from_upload("key.csv", b"1,A\n2,B\n")
+
+    # Choosing a version takes only that version's sheet from the full PDF.
+    assert session.set_key_from_upload("keys.pdf", key_pdf, version=2) == [2]
+    assert session.missing_versions() == [1]
+    assert session.keys[2].answers[3] == frozenset({0, 2})
+
+    # A chosen version that isn't in the file is reported.
+    one_sheet = png(fill_bubbles(pages[0], spec, KEY1, rng))  # version 1's key sheet only
+    with pytest.raises(AnswerKeyError, match="no key for version 2"):
+        GradingSession(user_id="t").set_key_from_upload("k1.png", one_sheet, version=2)
