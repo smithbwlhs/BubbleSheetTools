@@ -31,7 +31,8 @@
       <p class="kicker">No account needed</p>
       <h1>Make bubble sheets</h1>
       <p class="lead">Every student gets a personal sheet with a QR code. The first page of the
-        PDF is the <em>answer key sheet</em>. Fill it in yourself and scan it when you grade.</p>
+        PDF is the <em>answer key sheet</em>. Fill it in yourself, or paste your key below and
+        it comes already filled in.</p>
     </div>
 
     <form id="create-form" novalidate>
@@ -88,6 +89,27 @@
             <span id="names-count" class="hint"></span>
           </div>
           <ul id="names-preview" class="chips" hidden></ul>
+        </div>
+      </section>
+
+      <section class="step">
+        <div class="step-head">
+          <span class="step-num">03</span>
+          <h2>Answer key <span class="h-note">optional</span></h2>
+        </div>
+        <div class="step-body">
+          <p class="hint">Paste your key to get answer key sheets that are already filled in, so
+            there's nothing to bubble or scan. One answer per line: <code>B</code>,
+            <code>AC</code> when more than one answer is correct, or <code>FR</code> for free
+            response. Numbered lines (<code>1. B</code>) and tables are fine. Checking the key
+            fills in the number of questions and open questions for you.</p>
+          <div id="key-inputs" class="key-inputs"></div>
+          <div class="row">
+            <label class="file-btn">Upload a CSV instead
+              <input id="key-csv" type="file" accept=".csv,.txt,text/csv"></label>
+            <button type="button" id="check-key" class="ghost">Check key</button>
+            <span id="key-summary" class="hint"></span>
+          </div>
         </div>
       </section>
 

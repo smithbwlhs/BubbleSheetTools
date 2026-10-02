@@ -55,8 +55,13 @@ def _to_gray_array(img: Image.Image) -> np.ndarray:
     return np.array(img)
 
 
-def load_pages(filename: str, data: bytes, max_pages: int = 200) -> list[np.ndarray]:
-    """Return one grayscale numpy image per page in the uploaded file."""
+def load_pages(filename: str, data: bytes, max_pages: int = 200,
+               first_only: bool = False) -> list[np.ndarray]:
+    """Return one grayscale numpy image per page in the uploaded file.
+
+    With first_only, a longer PDF is not an error: only its first `max_pages`
+    pages are read (used for answer keys, whose sheets come first).
+    """
     if not data:
         raise UploadError(f"{filename} is empty.")
     ext = _extension(filename)
@@ -68,10 +73,10 @@ def load_pages(filename: str, data: bytes, max_pages: int = 200) -> list[np.ndar
             raise UploadError(f"{filename} could not be opened as a PDF.") from exc
         if doc.page_count == 0:
             raise UploadError(f"{filename} has no pages.")
-        if doc.page_count > max_pages:
+        if doc.page_count > max_pages and not first_only:
             raise UploadError(f"{filename} has {doc.page_count} pages; the limit is {max_pages}.")
         pages = []
-        for page in doc:
+        for page in list(doc)[:max_pages]:
             pix = page.get_pixmap(dpi=PDF_RENDER_DPI, colorspace=pymupdf.csGRAY, alpha=False)
             arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
             pages.append(arr.copy())

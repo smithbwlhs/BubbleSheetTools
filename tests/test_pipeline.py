@@ -75,8 +75,16 @@ def test_student_sheet_rejected_as_key(exam):
 
 def test_blank_key_sheet_rejected(exam):
     _, pages, _, _ = exam
-    with pytest.raises(AnswerKeyError, match="no answer marked"):
+    with pytest.raises(AnswerKeyError, match="is blank"):
         GradingSession(user_id="t").set_key_from_upload("k.png", png(pages[0]))
+
+
+def test_partly_filled_key_sheet_rejected(exam):
+    spec, pages, key, rng = exam
+    partial = {q: v for q, v in key.items() if q <= 10}
+    with pytest.raises(AnswerKeyError, match="no answer marked for question"):
+        GradingSession(user_id="t").set_key_from_upload(
+            "k.png", png(fill_bubbles(pages[0], spec, partial, rng)))
 
 
 def test_full_batch(exam):

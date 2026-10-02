@@ -103,6 +103,7 @@ function setupCreateForm() {
   }
   $("#num-written").addEventListener("input", renderWrittenInputs);
   renderWrittenInputs();
+  setupKeyEntry();
 
   // Any change to the names invalidates the previous check.
   $("#names-text").addEventListener("input", () => {
@@ -181,9 +182,107 @@ function validateCreateForm() {
   return problems;
 }
 
+/* ---- optional answer key on the create form ---- */
+
+let keyCsvText = null;   // contents of an uploaded key CSV (takes precedence over pasted keys)
+let keyChecked = false;  // has the current key been checked (and the form updated)?
+
+function setupKeyEntry() {
+  $("#num-versions").addEventListener("change", renderKeyInputs);
+  renderKeyInputs();
+  $("#key-csv").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    keyCsvText = await file.text();
+    $$("[data-key]").forEach((t) => { t.value = ""; });
+    await checkKey();
+  });
+  $("#check-key").addEventListener("click", checkKey);
+}
+
+/** One key box per exam version (keeps whatever was already typed). */
+function renderKeyInputs() {
+  const box = $("#key-inputs");
+  const versions = Number($("#num-versions").value);
+  const existing = $$("[data-key]", box).map((t) => t.value);
+  box.replaceChildren();
+  for (let v = 0; v < versions; v++) {
+    const area = el("textarea", { rows: "8", "data-key": v, spellcheck: "false",
+      placeholder: "1. B\n2. AC\n3. FR\n4. D" });
+    area.value = existing[v] || "";
+    area.addEventListener("input", () => {
+      keyChecked = false;
+      keyCsvText = null;
+      $("#key-csv").value = "";
+      $("#key-summary").textContent = "";
+    });
+    box.append(versions > 1 ? el("label", {}, `Version ${v + 1}`, area) : area);
+  }
+  keyChecked = false;
+}
+
+function keyEntered() {
+  return keyCsvText !== null || $$("[data-key]").some((t) => t.value.trim());
+}
+
+function keyPayload() {
+  return { key_texts: $$("[data-key]").map((t) => t.value), key_csv: keyCsvText ?? "" };
+}
+
+/** "5,12,13,14" -> "5, 12-14" for the open questions field. */
+function formatQuestionList(qs) {
+  const parts = [];
+  for (let i = 0; i < qs.length; i++) {
+    let j = i;
+    while (j + 1 < qs.length && qs[j + 1] === qs[j] + 1) j++;
+    parts.push(i === j ? String(qs[i]) : `${qs[i]}-${qs[j]}`);
+    i = j;
+  }
+  return parts.join(", ");
+}
+
+/** Check the key with the server and fill in the exam settings from it. */
+async function checkKey() {
+  const errorBox = $("#create-error");
+  setAlert(errorBox, "");
+  if (!keyEntered()) {
+    $("#key-summary").textContent = "No key entered. You can fill in the key sheet by hand.";
+    return true;
+  }
+  try {
+    const res = await api("/api/key/parse", { method: "POST", json: keyPayload() });
+    $("#num-questions").value = res.num_questions;
+    $("#open-questions").value = formatQuestionList(res.open_questions);
+    if (Number($("#num-choices").value) < res.num_choices_needed) {
+      $("#num-choices").value = String(res.num_choices_needed);
+    }
+    const lastVersion = Math.max(...res.versions);
+    if (Number($("#num-versions").value) < lastVersion) {
+      $("#num-versions").value = String(lastVersion);
+      renderKeyInputs();
+    }
+    const mc = res.num_questions - res.open_questions.length;
+    const fr = res.open_questions.length
+      ? ` + ${res.open_questions.length} FR (${formatQuestionList(res.open_questions)})` : "";
+    const versions = res.versions.length > 1 ? ` · versions ${res.versions.join(", ")}` : "";
+    $("#key-summary").textContent =
+      `✔ ${res.num_questions} questions: ${mc} multiple choice${fr}${versions}. ` +
+      "Exam details updated to match.";
+    keyChecked = true;
+    return true;
+  } catch (err) {
+    keyChecked = false;
+    $("#key-summary").textContent = "";
+    setAlert(errorBox, err.message, "error");
+    return false;
+  }
+}
+
 async function createSheets(e) {
   e.preventDefault();
   const errorBox = $("#create-error");
+  // Check the key first: it may change the number of questions and open questions.
+  if (keyEntered() && !keyChecked && !(await checkKey())) return;
   const problems = validateCreateForm();
   if (problems.length) { setAlert(errorBox, problems, "error"); return; }
   if (!parsedNames && !(await checkNames())) return;
@@ -201,6 +300,7 @@ async function createSheets(e) {
       num_versions: Number($("#num-versions").value),
       open_questions: $("#open-questions").value.trim(),
       names: parsedNames,
+      ...(keyEntered() ? keyPayload() : {}),
     };
     const blob = await api("/api/sheets", { method: "POST", json: body, blob: true });
     const safe = (s) => s.replace(/[^A-Za-z0-9._-]+/g, "_");
@@ -208,8 +308,12 @@ async function createSheets(e) {
     const keySheets = body.num_versions > 1
       ? `${body.num_versions} answer key sheets (pages 1–${body.num_versions}, one per version)`
       : "the answer key sheet (page 1)";
-    setAlert(errorBox, `Created ${parsedNames.length} student sheets plus ${keySheets}. ` +
-      "Print them all; fill in the answer key yourself.", "ok");
+    const keyNote = keyEntered()
+      ? "The key sheets are filled in from your key: check them, then upload those pages " +
+        "as the key when grading (no need to print them). Print the student sheets."
+      : "Print them all; fill in the answer key yourself.";
+    setAlert(errorBox, `Created ${parsedNames.length} student sheets plus ${keySheets}. ${keyNote}`,
+             "ok");
   } catch (err) {
     setAlert(errorBox, err.message, "error");
   } finally {

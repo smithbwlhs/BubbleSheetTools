@@ -14,7 +14,10 @@ Keys come from either:
         3,A;C       (";" "|" "/" or spaces also work)
         4,AC
         5,B,D       (extra cells are extra correct answers)
-        6,open      (an open-response question: not machine graded; "-" also works)
+        6,open      (an open-response question: not machine graded; "FR" and "-" also work)
+
+parse_key_list() is the looser format used when creating sheets: one answer
+per line ("B", "AC", "FR"), optionally numbered ("1. B", "1,B", "| 1 | B |").
 """
 
 import csv
@@ -26,7 +29,8 @@ from .sheet_layout import CHOICE_LETTERS, MAX_QUESTIONS
 
 
 # Answer-cell values meaning "open-response question, don't machine grade".
-OPEN_WORDS = {"open", "open response", "-", "--", "n/a", "na", "skip"}
+OPEN_WORDS = {"open", "open response", "-", "--", "n/a", "na", "skip",
+              "fr", "frq", "free response"}
 
 
 class AnswerKeyError(ValueError):
@@ -140,4 +144,105 @@ def parse_versioned_key_csv(text: str) -> dict[int, AnswerKey] | None:
     counts = {k.num_questions for k in keys.values()}
     if len(counts) > 1:
         raise AnswerKeyError("Every version must have the same number of questions.")
+    return keys
+
+
+_NUMBERED = re.compile(r"^\s*(\d{1,3})\s*[.):\-]?\s+(\S.*)$")   # "1. B", "12) AC", "3 FR"
+_TABLE_RULE = re.compile(r"^[\s|:\-]+$")                       # markdown "|---|---|"
+
+
+def parse_key_list(text: str) -> AnswerKey:
+    """Parse an answer key typed or pasted when creating sheets.
+
+    Accepts, line by line (mixing is fine):
+      * an answer on its own: "B", "AC" (several correct), "FR" (free response)
+      * a numbered answer: "1. B", "1) AC", "1,B", "1 FR"
+      * markdown table rows, as Claude often writes keys: "| 1 | B |"
+    Lines without a number take the next number. A first line that isn't an
+    answer (e.g. "Question,Answer") is treated as a header and skipped.
+    """
+    text = (text or "").lstrip("\ufeff")
+    if not text.strip():
+        raise AnswerKeyError("The answer key is empty.")
+
+    answers: dict[int, frozenset[int]] = {}
+    open_qs: set[int] = set()
+    next_q = 1
+    first = True
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or _TABLE_RULE.match(line):
+            continue
+        if "|" in line:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+        else:
+            cells = next(csv.reader([line]))
+        cells = [c.strip() for c in cells if c.strip()]
+        if not cells:
+            continue
+
+        q, answer = None, cells
+        number = cells[0].rstrip(".):")
+        if len(cells) >= 2 and number.isdigit():
+            q, answer = int(number), cells[1:]
+        elif len(cells) == 1 and (m := _NUMBERED.match(cells[0])):
+            q, answer = int(m.group(1)), [m.group(2)]
+
+        word = " ".join(answer).strip().lower().rstrip(".")
+        try:
+            choices = None if word in OPEN_WORDS else _parse_choices(answer)
+        except AnswerKeyError as exc:
+            if first and q is None:
+                first = False
+                continue  # header row such as "Question, Answer"
+            where = f"Line {line_no}" + (f" (question {q})" if q else "")
+            raise AnswerKeyError(f"{where}: {exc}. Use letters like B or AC, or FR for "
+                                 "free response.") from None
+        first = False
+
+        q = q if q is not None else next_q
+        if not 1 <= q <= MAX_QUESTIONS:
+            raise AnswerKeyError(f"Line {line_no}: question {q} is out of range (1-{MAX_QUESTIONS}).")
+        if q in answers or q in open_qs:
+            raise AnswerKeyError(f"Line {line_no}: question {q} appears more than once.")
+        if choices is None:
+            open_qs.add(q)
+        else:
+            answers[q] = choices
+        next_q = q + 1
+
+    if not answers:
+        raise AnswerKeyError("No multiple choice answers were found in the answer key.")
+    last = max(set(answers) | open_qs)
+    missing = [q for q in range(1, last + 1) if q not in answers and q not in open_qs]
+    if missing:
+        raise AnswerKeyError(
+            f"The answer key skips question(s) {', '.join(map(str, missing[:10]))}. "
+            "Write FR for free-response questions.")
+    return AnswerKey(answers=answers, open_questions=frozenset(open_qs))
+
+
+def parse_form_keys(key_texts: list[str], key_csv: str = "") -> dict[int, AnswerKey]:
+    """Answer keys entered on the create-sheets form: one pasted list per
+    version, or an uploaded CSV (which may have "Version 1, Version 2" columns).
+    Returns {version: AnswerKey}; empty if no key was entered."""
+    if key_csv.strip():
+        keys = parse_versioned_key_csv(key_csv) or {1: parse_key_list(key_csv)}
+    else:
+        keys = {}
+        for v, text in enumerate(key_texts, start=1):
+            if text.strip():
+                try:
+                    keys[v] = parse_key_list(text)
+                except AnswerKeyError as exc:
+                    raise AnswerKeyError(f"Version {v}: {exc}" if len(key_texts) > 1
+                                         else str(exc)) from None
+    if not keys:
+        return {}
+    first = next(iter(keys.values()))
+    for v, k in keys.items():
+        if k.num_questions != first.num_questions:
+            raise AnswerKeyError("Every version's key must have the same number of questions.")
+        if k.open_questions != first.open_questions:
+            raise AnswerKeyError("Every version's key must have FR on the same questions.")
     return keys

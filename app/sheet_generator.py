@@ -19,9 +19,10 @@ from qrcode.constants import ERROR_CORRECT_M
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+from .answer_key import AnswerKey
 from .sheet_layout import (
     CONTENT_LEFT, CONTENT_RIGHT, FIDUCIAL_CENTERS, FIDUCIAL_SIZE, PAGE_H, PAGE_W, QR_BOX,
-    ExamSpec, PageLayout, SheetIdentity, build_layout, encode_qr,
+    ExamSpec, PageLayout, SheetIdentity, build_layout, encode_qr, format_question_list,
 )
 
 BUBBLE_OUTLINE_GRAY = 0.15  # 0 = black, 1 = white
@@ -52,7 +53,7 @@ def _fit_text(c: canvas.Canvas, text: str, font: str, size: float, max_w: float)
 
 
 def _draw_frame(c: canvas.Canvas, spec: ExamSpec, who: SheetIdentity,
-                page: PageLayout, total_pages: int) -> None:
+                page: PageLayout, total_pages: int, prefilled: bool = False) -> None:
     """Corner squares, header text and QR code (common to every page)."""
     # Corner squares.
     c.setFillGray(0)
@@ -76,10 +77,16 @@ def _draw_frame(c: canvas.Canvas, spec: ExamSpec, who: SheetIdentity,
         label = f"ANSWER KEY \u2014 Version {who.version}" if who.version else "ANSWER KEY"
         c.drawString(CONTENT_LEFT, _flip(92), label)
         c.setFont("Helvetica", 9)
-        c.drawString(CONTENT_LEFT, _flip(110),
-                     "Fill in every correct answer. Bubble more than one if several are correct.")
-        c.drawString(CONTENT_LEFT, _flip(122),
-                     "Scan and upload this sheet first. Keep it away from students.")
+        if prefilled:
+            c.drawString(CONTENT_LEFT, _flip(110),
+                         "Filled in from the answer key you entered. Check it before grading.")
+            c.drawString(CONTENT_LEFT, _flip(122),
+                         "Upload this page (no need to print it) as the key. Keep it from students.")
+        else:
+            c.drawString(CONTENT_LEFT, _flip(110),
+                         "Fill in every correct answer. Bubble more than one if several are correct.")
+            c.drawString(CONTENT_LEFT, _flip(122),
+                         "Scan and upload this sheet first. Keep it away from students.")
     else:
         name = f"Name: {who.student_name}"
         c.setFont("Helvetica", _fit_text(c, name, "Helvetica", 13, text_w))
@@ -122,8 +129,11 @@ def _draw_version_row(c: canvas.Canvas, page: PageLayout, filled: int = 0) -> No
     c.drawString(last.x + last.r + 14, _flip(lbl.y) - 3, note)
 
 
-def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0) -> None:
-    """Bubbles, question numbers, column letters and written response boxes."""
+def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0,
+               filled: dict[int, frozenset[int]] | None = None) -> None:
+    """Bubbles, question numbers, column letters and written response boxes.
+    `filled` ({question: choices}) pre-fills bubbles, for answer key sheets."""
+    filled = filled or {}
     _draw_version_row(c, page, version_filled)
     c.setFillGray(0)
     for h in page.headers:
@@ -138,6 +148,10 @@ def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0) -> N
     c.setLineWidth(0.8)
     for b in page.bubbles:
         c.setStrokeGray(BUBBLE_OUTLINE_GRAY)
+        if b.choice in filled.get(b.question, ()):
+            c.setFillGray(0)
+            c.circle(b.x, _flip(b.y), b.r, stroke=1, fill=1)
+            continue
         c.circle(b.x, _flip(b.y), b.r, stroke=1, fill=0)
         letter_size = b.r * 1.15
         c.setFont("Helvetica", letter_size)
@@ -164,11 +178,41 @@ def _draw_body(c: canvas.Canvas, page: PageLayout, version_filled: int = 0) -> N
         c.rect(w.x, _flip(w.y + w.h), w.w, w.h, stroke=1, fill=0)
 
 
-def generate_sheets_pdf(spec: ExamSpec, names: list[str]) -> bytes:
-    """Build the full PDF: answer key sheet, then every student's sheet."""
+def check_keys_match(spec: ExamSpec, keys: dict[int, AnswerKey]) -> None:
+    """Make sure answer keys entered on the form fit the exam settings."""
+    if not keys:
+        return
+    if max(keys) > spec.num_versions:
+        raise ValueError(f"There is a key for version {max(keys)} but the exam has "
+                         f"{spec.num_versions} version(s).")
+    for v, key in keys.items():
+        label = f"The version {v} answer key" if spec.num_versions > 1 else "The answer key"
+        if key.num_questions != spec.num_questions:
+            raise ValueError(f"{label} has {key.num_questions} questions but the exam is set "
+                             f"to {spec.num_questions}.")
+        if set(key.open_questions) != set(spec.open_questions):
+            raise ValueError(f"{label} has FR on question(s) "
+                             f"{format_question_list(key.open_questions) or 'none'}, but the "
+                             f"exam's open questions are "
+                             f"{format_question_list(spec.open_questions) or 'none'}.")
+        too_high = [q for q, ch in key.answers.items() if max(ch) >= spec.num_choices]
+        if too_high:
+            q = too_high[0]
+            raise ValueError(f"{label} uses {key.letters(q)} on question {q}, but the sheet "
+                             f"only has {spec.num_choices} answer choices.")
+
+
+def generate_sheets_pdf(spec: ExamSpec, names: list[str],
+                        keys: dict[int, AnswerKey] | None = None) -> bytes:
+    """Build the full PDF: answer key sheet(s), then every student's sheet.
+
+    With `keys` ({version: AnswerKey}) the key sheets come pre-filled.
+    """
     pages = build_layout(spec)  # also validates the spec
     if not names:
         raise ValueError("At least one student name is required.")
+    keys = keys or {}
+    check_keys_match(spec, keys)
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
@@ -179,12 +223,14 @@ def generate_sheets_pdf(spec: ExamSpec, names: list[str]) -> bytes:
     # exams get one per version, with that version already filled in.
     key_page = PageLayout(page=1, bubbles=pages[0].bubbles, labels=pages[0].labels,
                           headers=pages[0].headers, version_bubbles=pages[0].version_bubbles,
-                          version_label=pages[0].version_label)
+                          version_label=pages[0].version_label, open_boxes=pages[0].open_boxes)
     versions = range(1, spec.num_versions + 1) if spec.num_versions > 1 else [0]
     for version in versions:
         key = SheetIdentity(kind="k", student_name="", student_index=0, version=version)
-        _draw_frame(c, spec, key, key_page, 1)
-        _draw_body(c, key_page, version_filled=version)
+        answer_key = keys.get(version or 1)
+        _draw_frame(c, spec, key, key_page, 1, prefilled=answer_key is not None)
+        _draw_body(c, key_page, version_filled=version,
+                   filled=answer_key.answers if answer_key else None)
         c.showPage()
 
     for index, name in enumerate(names, start=1):

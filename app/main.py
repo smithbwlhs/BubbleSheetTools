@@ -5,7 +5,8 @@ Routes
   Public (no account needed)
     GET  /                      the web app (static/index.html)
     POST /api/roster/parse      turn pasted text / CSV into a list of names
-    POST /api/sheets            download the bubble sheet PDF
+    POST /api/key/parse         check an answer key typed/pasted/uploaded on the form
+    POST /api/sheets            download the bubble sheet PDF (key sheets pre-filled if a key is given)
 
   Accounts (Supabase, see auth.py)
     POST /api/auth/signup | login | logout | forgot | reset | password
@@ -36,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import auth, export, sessions
-from .answer_key import AnswerKeyError
+from .answer_key import AnswerKeyError, parse_form_keys
 from .config import settings
 from .grading import GradingSession, letters
 from .roster import RosterError, parse_csv, parse_pasted
@@ -108,6 +109,36 @@ class SheetsIn(BaseModel):
     num_versions: int = 1
     open_questions: str = Field("", max_length=400)  # e.g. "5, 12-14"
     names: list[str] = Field(default_factory=list, max_length=1000)
+    # Optional answer key(s) to pre-fill the key sheets: one pasted list per
+    # version, or the text of an uploaded CSV (which takes precedence).
+    key_texts: list[str] = Field(default_factory=list, max_length=4)
+    key_csv: str = Field("", max_length=100_000)
+
+
+class KeyIn(BaseModel):
+    key_texts: list[str] = Field(default_factory=list, max_length=4)
+    key_csv: str = Field("", max_length=100_000)
+
+
+@app.post("/api/key/parse")
+def key_parse(body: KeyIn):
+    """Check an answer key entered on the create form and summarise it, so the
+    form can fill in the number of questions, open questions and choices."""
+    try:
+        keys = parse_form_keys(body.key_texts, body.key_csv)
+    except AnswerKeyError as exc:
+        raise _bad(str(exc))
+    if not keys:
+        raise _bad("Enter an answer key, or leave the box empty to fill in the key sheet by hand.")
+    first = next(iter(keys.values()))
+    return {
+        "versions": sorted(keys),
+        "num_questions": first.num_questions,
+        "open_questions": sorted(first.open_questions),
+        "num_choices_needed": max(c for k in keys.values() for a in k.answers.values() for c in a) + 1,
+        "answers": {v: [("FR" if q in k.open_questions else k.letters(q))
+                        for q in range(1, k.num_questions + 1)] for v, k in keys.items()},
+    }
 
 
 @app.get("/api/sheets/limits")
@@ -126,13 +157,14 @@ def make_sheets(body: SheetsIn):
         raise _bad("Add at least one student name before creating sheets.")
     try:
         names = parse_pasted("\n".join(names))  # same cleaning/limits as the roster step
+        keys = parse_form_keys(body.key_texts, body.key_csv)
         open_qs = parse_question_list(body.open_questions, max(body.num_questions, 1))
         spec = ExamSpec(class_name=body.class_name.strip(), exam_name=body.exam_name.strip(),
                         num_questions=body.num_questions, num_choices=body.num_choices,
                         written_heights=tuple(round(h, 2) for h in body.written_heights),
                         num_versions=body.num_versions, open_questions=open_qs)
-        pdf = generate_sheets_pdf(spec, names)
-    except (LayoutError, RosterError, ValueError) as exc:
+        pdf = generate_sheets_pdf(spec, names, keys)
+    except (LayoutError, RosterError, AnswerKeyError, ValueError) as exc:
         raise _bad(str(exc))
     filename = f"{_safe_filename(spec.class_name)}_{_safe_filename(spec.exam_name)}_sheets.pdf"
     return Response(pdf, media_type="application/pdf",

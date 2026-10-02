@@ -593,7 +593,9 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
     """Read ANSWER KEY sheet(s) from a scanned PDF or photo. A PDF may hold
     the key sheets for several versions; each one's QR code says its version."""
     try:
-        images = load_pages(filename, data, max_pages=20)
+        # Key sheets come first in the PDFs this site makes, so teachers can
+        # upload the whole downloaded PDF: only the first pages are read.
+        images = load_pages(filename, data, max_pages=8, first_only=True)
     except UploadError as exc:
         raise AnswerKeyError(str(exc)) from None
 
@@ -608,6 +610,8 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
             problems.append(str(exc))
             continue
         if who.kind != "k":
+            if keys:
+                break  # past the key sheets, into the student sheets
             problems.append(f"That is {who.student_name}'s sheet, not an ANSWER KEY sheet.")
             continue
         if spec_found and spec.exam_id != spec_found.exam_id:
@@ -617,6 +621,12 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
 
         reads = read_bubbles(canon, build_layout(spec)[0])
         reads.pop(0, None)  # the version row is pre-printed on key sheets
+        if not any(r.marked or r.unclear for r in reads.values()):
+            # A completely empty key sheet (e.g. a version whose key wasn't
+            # entered yet): skip it; other key sheets in the file still count.
+            problems.append(f"{label} sheet is blank. Fill it in and scan it, or upload a "
+                            "CSV key for it.")
+            continue
         blank = [q for q, r in reads.items() if not r.marked and not r.unclear]
         unclear = [q for q, r in reads.items() if r.unclear]
         if blank or unclear:

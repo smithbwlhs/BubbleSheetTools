@@ -14,6 +14,11 @@ scanned sheets, and export the results as CSV files and PNG charts.
   - `results.csv`: one row per student, with every answer
   - `item_analysis.csv`: % correct, # missed and choice counts per question
   - `score_distribution.png`, `most_missed.png`, `choice_distribution.png`
+- **Paste or upload your answer key** when creating sheets (optional): one answer per line
+  (`B`, `AC`, `FR` for free response), numbered lines, a CSV, or a markdown table. The key
+  sheets come pre-filled, and the form's question count, open questions and choices are set
+  from the key. When grading, upload the downloaded PDF itself as the key; only its key
+  sheets are read, so nothing has to be printed or scanned.
 - **Exam versions** (up to 4): with 2 or more, every sheet gets a "Version" bubble row
   and the PDF starts with one answer key sheet per version. Each student is graded against
   the key for the version they bubbled; a blank or double-marked version is flagged for
