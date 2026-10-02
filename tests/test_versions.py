@@ -212,3 +212,35 @@ def test_results_csv_round_trip_with_versions():
     assert by_name["Mae"].version is None and by_name["Mae"].flags[0].reason == "version-csv"
     restored.resolve(by_name["Mae"].id, 0, "1")
     assert restored.score(by_name["Mae"]) == 3
+
+
+def test_mixed_key_files_for_four_versions():
+    """A PDF holding two key sheets, a photo of a third, and a CSV for the fourth."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    spec = ExamSpec("Bio P3", "Unit 4", 6, 4, num_versions=4)
+    pages = render_pdf_pages(generate_sheets_pdf(spec, ["Ada"]))
+    rng = np.random.default_rng(9)
+    keys = {v: {q: {(q + v) % 4} for q in range(1, 7)} for v in range(1, 5)}
+    pdf_v1_v2 = images_to_pdf([fill_bubbles(pages[0], spec, keys[1], rng),
+                               fill_bubbles(pages[1], spec, keys[2], rng)])
+    photo_v3 = distort(fill_bubbles(pages[2], spec, keys[3], rng), rng, angle=3, noise=4,
+                       jpeg_quality=70)
+    csv_v4 = "\n".join(f"{q},{letters(keys[4])[q]}" for q in range(1, 7)).encode()
+
+    client.post("/api/grade/start")
+    state = client.post("/api/grade/settings", json={"num_versions": 4}).json()
+    assert [k["loaded"] for k in state["keys"]] == [False] * 4
+    state = client.post("/api/grade/key", files={"file": ("keys_1_2.pdf", pdf_v1_v2)}).json()
+    assert [k["loaded"] for k in state["keys"]] == [True, True, False, False]
+    state = client.post("/api/grade/key", files={"file": ("v3.jpg", png(photo_v3))}).json()
+    assert [k["loaded"] for k in state["keys"]] == [True, True, True, False]
+    assert not state["ready"]
+    state = client.post("/api/grade/key", files={"file": ("key.csv", csv_v4)},
+                        data={"version": "4"}).json()
+    assert state["ready"] and [k["source"] for k in state["keys"]] == \
+        ["keys_1_2.pdf", "keys_1_2.pdf", "v3.jpg", "key.csv"]
+    client.post("/api/grade/clear")

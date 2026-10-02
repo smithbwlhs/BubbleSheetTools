@@ -199,9 +199,11 @@
           <h2>Answer key</h2>
         </div>
         <div class="step-body">
-          <p class="hint">Upload the scanned <strong>answer key sheet</strong> (PDF, JPG, PNG or HEIC),
-            or a CSV with one row per question, like <code>1,B</code> (or <code>2,AC</code> when
-            more than one answer is correct).</p>
+          <p class="hint">Upload the <strong>answer key sheet</strong>: the sheets PDF you
+            downloaded (if you entered the key there), or a scan or photo of the filled-in sheet
+            (PDF, JPG, PNG or HEIC). Or upload a CSV with one row per question, like
+            <code>1,B</code> (<code>2,AC</code> when more than one answer is correct,
+            <code>3,FR</code> for free response).</p>
           <div class="row">
             <label class="inline">Versions on this exam
               <select id="grade-versions">
@@ -212,15 +214,19 @@
           </div>
           <ul id="key-list" class="key-list" hidden></ul>
           <div class="row">
-            <label class="file-btn solid">Choose answer key
-              <input id="key-file" type="file" accept=".csv,.pdf,.jpg,.jpeg,.png,.heic,.heif"></label>
+            <label class="file-btn solid">Choose answer key files
+              <input id="key-file" type="file" multiple
+                     accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.csv,.txt"></label>
             <label id="key-version-box" class="inline" hidden>CSV key is for
               <select id="key-version"></select></label>
             <span id="key-status" class="hint"></span>
           </div>
-          <p id="key-version-hint" class="hint" hidden>Scanned key sheets know their own version,
-            and you can scan them all into one PDF. For a CSV key, pick its version first, or
-            upload one CSV with <code>Question, Version 1, Version 2, &hellip;</code> columns.</p>
+          <p id="key-version-hint" class="hint" hidden>You can choose several files at once: PDFs
+            or photos of key sheets (each one knows its own version, and one PDF can hold them
+            all), and CSVs. A CSV goes to the version in its file name (like
+            <code>key_v2.csv</code>), otherwise to the version picked above and then the next
+            missing ones. One CSV with <code>Question, Version 1, Version 2, &hellip;</code>
+            columns sets every version.</p>
           <div class="subsection">
             <p class="hint">Or continue from earlier results: upload one or more
               <code>results.csv</code> files downloaded from this site. They must share the same
