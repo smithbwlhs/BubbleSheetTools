@@ -520,6 +520,8 @@ function renderGrade(state) {
   // Step 2: uploads, locked until every version has a key
   show($("#upload-locked"), !state.ready);
   show($("#upload-area"), state.ready);
+  $("#graded-count").textContent = graded
+    ? `${graded} student sheet${graded === 1 ? "" : "s"} graded so far.` : "";
   renderPageMessages(state.messages);
 
   // Steps 3-4
@@ -568,10 +570,6 @@ function renderKeys(state) {
       : multi
         ? `${loaded.length} of ${state.num_versions} keys loaded · ${counts}`
         : `Loaded from ${loaded[0].source} · ${counts}`;
-  // The keys can't change once students are graded against them.
-  $("#key-file").disabled = locked;
-  $("#key-file").closest("label").title = locked
-    ? "Start a new grading session to use a different answer key." : "";
 }
 
 function renderPageMessages(messages) {
@@ -613,37 +611,23 @@ function setupGrading() {
     if (!loaded) { await api("/api/grade/clear", { method: "POST" }).catch(() => {}); return; }
     $("#step-results").scrollIntoView({ behavior: "smooth" });
   });
-  $("#import-file").addEventListener("change", async (e) => {
-    const files = Array.from(e.target.files);
-    e.target.value = "";
-    if (files.length) await importResults(files, $("#key-error"));
-  });
 
   $("#clear-btn").addEventListener("click", () => {
     if (!confirm("Delete all grading data for this session? Download your results first.")) return;
     handleApiError(async () => {
       await api("/api/grade/clear", { method: "POST" });
       $("#upload-log").replaceChildren();
+      $("#key-log").replaceChildren();
       renderGrade(null);
     });
   });
 
-  $("#key-file").addEventListener("change", async (e) => {
-    const files = Array.from(e.target.files);
-    e.target.value = "";
-    if (files.length) await uploadKeys(files);
-  });
-
-  const input = $("#sheet-files");
-  input.addEventListener("change", () => { uploadFiles(Array.from(input.files)); input.value = ""; });
-  const zone = $("#drop-zone");
-  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
-  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-  zone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    zone.classList.remove("over");
-    uploadFiles(Array.from(e.dataTransfer.files));
-  });
+  // Both drop areas accept any mix of files (keys, student sheets, results CSVs).
+  // Step 1's also applies the "Key is for" choice.
+  setupDropZone($("#key-drop"), $("#key-file"),
+                (files) => handleFiles(files, $("#key-log"), true));
+  setupDropZone($("#drop-zone"), $("#sheet-files"),
+                (files) => handleFiles(files, $("#upload-log"), false));
 
   $("#done-btn").addEventListener("click", () => handleApiError(async () => {
     renderGrade(await api("/api/grade/done", { method: "POST" }));
@@ -667,37 +651,84 @@ function versionFromName(name) {
   return m ? Number(m[1]) : null;
 }
 
-/**
- * Upload one or more answer key files (PDFs, photos, CSVs), one at a time.
- * "Key is for: All versions" lets each file say which versions it holds (key
- * sheets via their QR codes, CSVs via Version columns or a version in the file
- * name). Choosing one version applies every file to that version only.
- */
-async function uploadKeys(files) {
-  const errBox = $("#key-error");
-  setAlert(errBox, "");
-  const isCsv = (f) => /\.(csv|txt)$/i.test(f.name);
-  const multi = gradeState && gradeState.num_versions > 1;
-  const picked = $("#key-version").value;  // "all" or a version number
-  const problems = [];
+/** Make a <label class="drop-zone"> accept dropped files as well as clicks. */
+function setupDropZone(zone, input, onFiles) {
+  input.addEventListener("change", () => {
+    const files = Array.from(input.files);
+    input.value = "";
+    if (files.length) onFiles(files);
+  });
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    zone.classList.remove("over");
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length) onFiles(files);
+  });
+}
 
-  for (const [i, file] of files.entries()) {
-    $("#key-status").textContent = `Reading ${file.name} (${i + 1} of ${files.length})…`;
+/** One-line description of what the server did with an uploaded file. */
+function describeUpload(s) {
+  if (s.kind === "results") {
+    const r = s.imported;
+    return `results: ${r.added} student${r.added === 1 ? "" : "s"} loaded` +
+      (r.replaced ? `, ${r.replaced} replaced` : "");
+  }
+  const parts = [];
+  if (s.pages) parts.push(`${s.pages} page${s.pages === 1 ? "" : "s"}`);
+  if (s.keys.length) {
+    parts.push(gradeState && gradeState.num_versions > 1
+      ? `key for version ${s.keys.join(", ")}` : "answer key loaded");
+  }
+  if (s.graded.length) {
+    parts.push(`${s.graded.length} student sheet${s.graded.length === 1 ? "" : "s"} graded`);
+  }
+  return parts.join(", ") || "nothing new found";
+}
+
+/**
+ * Upload files one at a time to /api/grade/files, which sorts every page:
+ * answer key sheets are applied first, then students' sheets are graded, and
+ * results CSVs are loaded. Each file gets a line in `log` with any problems.
+ * `useKeyChoice`: apply the "Key is for" menu (step 1's drop area).
+ */
+async function handleFiles(files, log, useKeyChoice) {
+  const isCsv = (f) => /\.(csv|txt)$/i.test(f.name);
+  const doneBtn = $("#done-btn");
+  doneBtn.disabled = true;
+  setAlert($("#key-error"), "");
+  for (const file of files) {
+    const status = el("span", { class: "status" }, "reading…");
+    const details = el("ul", { class: "file-messages" });
+    log.prepend(el("li", {}, el("span", { class: "fname" }, file.name), status, details));
+
     const form = new FormData();
     form.append("file", file);
+    const multi = gradeState && gradeState.num_versions > 1;
+    const picked = useKeyChoice ? $("#key-version").value : "all";
     const version = !multi ? null
       : picked !== "all" ? Number(picked)
         : isCsv(file) ? versionFromName(file.name) : null;
     if (version) form.append("version", version);
+
     try {
-      renderGrade(await api("/api/grade/key", { method: "POST", form }));
+      const res = await api("/api/grade/files", { method: "POST", form });
+      const s = res.summary;
+      const problems = s.messages.filter((m) => m.level === "error");
+      status.textContent = describeUpload(s) +
+        (problems.length ? ` · ${problems.length} problem${problems.length === 1 ? "" : "s"}` : "");
+      status.className = "status " + (problems.length ? "err" : "ok");
+      details.replaceChildren(...s.messages.map((m) =>
+        el("li", { class: m.level }, m.source === s.file ? m.message : `${m.source}: ${m.message}`)));
+      renderGrade(res.state);
     } catch (err) {
-      problems.push(`${file.name}: ${err.message}`);
+      status.textContent = err.message;
+      status.className = "status err";
       if (err.status === 409) { renderGrade(null); break; }
     }
   }
-  if (gradeState) renderKeys(gradeState);
-  if (problems.length) setAlert(errBox, problems, "error");
+  doneBtn.disabled = false;
 }
 
 /** Load results CSVs one at a time. Returns true if at least one loaded. */
@@ -725,35 +756,6 @@ async function importResults(files, messageBox) {
   setAlert(messageBox, lines, kind);
   if (loaded && messageBox.id !== "key-error") setAlert($("#key-error"), lines, kind);
   return loaded;
-}
-
-/** Upload files one at a time so each gets its own progress line. */
-async function uploadFiles(files) {
-  if (!files.length) return;
-  const log = $("#upload-log");
-  const doneBtn = $("#done-btn");
-  doneBtn.disabled = true;
-  for (const file of files) {
-    const status = el("span", { class: "status" }, "reading…");
-    log.prepend(el("li", {}, el("span", { class: "fname" }, file.name), status));
-    const form = new FormData();
-    form.append("file", file);
-    try {
-      const res = await api("/api/grade/upload", { method: "POST", form });
-      const s = res.summary;
-      const bad = s.messages.filter((m) => m.level === "error").length;
-      status.textContent = `${s.pages} page${s.pages === 1 ? "" : "s"}, ` +
-        `${s.graded.length} student sheet${s.graded.length === 1 ? "" : "s"} read` +
-        (bad ? `, ${bad} problem${bad === 1 ? "" : "s"} (see below)` : "");
-      status.className = "status " + (bad ? "err" : "ok");
-      renderGrade(res.state);
-    } catch (err) {
-      status.textContent = err.message;
-      status.className = "status err";
-      if (err.status === 409) { renderGrade(null); break; }
-    }
-  }
-  doneBtn.disabled = false;
 }
 
 /* ---- step 3: flagged answers ---- */

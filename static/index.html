@@ -199,11 +199,11 @@
           <h2>Answer key</h2>
         </div>
         <div class="step-body">
-          <p class="hint">Upload the <strong>answer key sheet</strong>: the sheets PDF you
-            downloaded (if you entered the key there), or a scan or photo of the filled-in sheet
-            (PDF, JPG, PNG or HEIC). Or upload a CSV with one row per question, like
-            <code>1,B</code> (<code>2,AC</code> when more than one answer is correct,
-            <code>3,FR</code> for free response).</p>
+          <p class="hint">Drop the <strong>answer key</strong>: the sheets PDF you downloaded (if
+            you entered the key there), a scan or photo of the filled-in key sheet, or a CSV with
+            one row per question like <code>1,B</code> (<code>2,AC</code> for several correct
+            answers, <code>3,FR</code> for free response). If the file also holds students'
+            sheets, they're graded right away.</p>
           <div class="row">
             <label class="inline">Versions on this exam
               <select id="grade-versions">
@@ -214,26 +214,26 @@
           </div>
           <ul id="key-list" class="key-list" hidden></ul>
           <div class="row">
-            <label class="file-btn solid">Choose answer key files
-              <input id="key-file" type="file" multiple
-                     accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.csv,.txt"></label>
             <label id="key-version-box" class="inline" hidden>Key is for
               <select id="key-version"></select></label>
             <span id="key-status" class="hint"></span>
           </div>
-          <p id="key-version-hint" class="hint" hidden>You can choose several files at once.
-            With <strong>All versions</strong>, the sheets PDF (or a scan of the key sheets) loads
-            every version's key, since each key sheet knows its version, and so does a CSV with
+          <label id="key-drop" class="drop-zone">
+            <input id="key-file" type="file" multiple
+                   accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.tif,.tiff,.csv,.txt">
+            <span class="drop-title">Drop the answer key here</span>
+            <span class="hint">or click to choose files (PDF, photo or CSV; several at once is fine)</span>
+          </label>
+          <ul id="key-log" class="upload-log"></ul>
+          <p id="key-version-hint" class="hint" hidden>With <strong>Key is for: All
+            versions</strong>, the sheets PDF (or a scan of the key sheets) loads every version's
+            key, since each key sheet knows its version, and so does a CSV with
             <code>Question, Version 1, Version 2, &hellip;</code> columns. A CSV holding one key
             goes to the version in its file name, like <code>key_v2.csv</code>. Pick a single
             version to load (or replace) just that version's key.</p>
-          <div class="subsection">
-            <p class="hint">Or continue from earlier results: upload one or more
-              <code>results.csv</code> files downloaded from this site. They must share the same
-              answer key. A student who appears again replaces their earlier row.</p>
-            <label class="file-btn">Load results CSV
-              <input id="import-file" type="file" accept=".csv,text/csv" multiple></label>
-          </div>
+          <p class="hint">Continuing from earlier results? Drop the <code>results.csv</code> files
+            you downloaded here. They must share the same answer key, and a student who appears
+            again replaces their earlier row.</p>
           <div id="key-error" class="alert error" hidden></div>
         </div>
       </section>
@@ -248,13 +248,16 @@
           <p id="upload-locked" class="hint locked">Locked until every version has an answer key.</p>
           <div id="upload-area" hidden>
             <p class="hint">Scans or photos (PDF, JPG, PNG or HEIC), in one batch or a few at a time.
-              Pages can be in any order, and upside down is fine.</p>
+              Pages can be in any order, and upside down is fine. Key sheets mixed in are
+              recognized too.</p>
             <label id="drop-zone" class="drop-zone">
-              <input id="sheet-files" type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.tif,.tiff">
+              <input id="sheet-files" type="file" multiple
+                     accept=".pdf,.jpg,.jpeg,.png,.heic,.heif,.tif,.tiff,.csv,.txt">
               <span class="drop-title">Drop scans here</span>
               <span class="hint">or click to choose files</span>
             </label>
             <ul id="upload-log" class="upload-log"></ul>
+            <p id="graded-count" class="hint"></p>
             <div id="page-messages"></div>
             <button id="done-btn" class="primary">Done uploading, review results</button>
           </div>

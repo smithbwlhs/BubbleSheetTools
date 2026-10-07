@@ -7,8 +7,10 @@ scanned sheets, and export the results as CSV files and PNG charts.
   (up to 100), answer choices per question (2–10) and optional numbered written-response
   boxes of any height. Paste student names or upload a CSV. You get one PDF: page 1 is
   the **answer key sheet**, then one personal sheet per student with a QR code.
-- **Grade exams** (teacher account): upload the filled-in key sheet (or a CSV key), then
-  upload student scans (PDF, JPG, PNG or HEIC), in one batch or several. Bubbles the
+- **Grade exams** (teacher account): drag and drop the filled-in key sheet (or a CSV key),
+  then student scans (PDF, JPG, PNG or HEIC), in one batch or several. Every page is
+  identified by its QR code, so one PDF holding both the key sheets and the students'
+  sheets loads the key and grades the students in a single upload. Bubbles the
   scanner can't read confidently are listed with a picture of the row so you can fix
   them by hand. Enter hand-graded written scores, then download:
   - `results.csv`: one row per student, with every answer

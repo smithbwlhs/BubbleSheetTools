@@ -15,6 +15,7 @@ Routes
   Grading (signed-in teachers only; everything held in memory, see sessions.py)
     POST /api/grade/start       begin a new grading session
     GET  /api/grade/state       everything the grading screen shows
+    POST /api/grade/files       any upload: keys, student sheets, both in one PDF, or results.csv
     POST /api/grade/key         upload the answer key (CSV, or scanned key sheet)
     POST /api/grade/import      continue from (or combine) results CSVs downloaded earlier
     POST /api/grade/upload      upload one file of student sheets
@@ -360,6 +361,23 @@ def grade_key(file: UploadFile = File(...), version: int | None = Form(None),
     except AnswerKeyError as exc:
         raise _bad(str(exc))
     return _state(session)
+
+
+@app.post("/api/grade/files")
+def grade_files(file: UploadFile = File(...), version: int | None = Form(None),
+                session: GradingSession = Depends(_session)):
+    """Any grading upload: answer keys, student sheets, a mix of both in one PDF,
+    or a results.csv. Key pages are applied first, then student pages graded.
+    `version` is the "Key is for" choice (omitted = all versions)."""
+    name = file.filename or "upload"
+    try:
+        summary = session.process_file(name, _read_upload(file), settings.max_pages_per_upload,
+                                       version)
+    except AnswerKeyError as exc:
+        raise _bad(str(exc))
+    if summary["graded"]:
+        session.done = False  # new sheets: review again before results
+    return {"summary": summary, "state": _state(session)}
 
 
 @app.post("/api/grade/import")

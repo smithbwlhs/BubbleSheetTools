@@ -219,6 +219,12 @@ class GradingSession:
         else:
             found, spec = _read_key_sheets(filename, data)
 
+        return self._apply_keys(found, spec, filename, version, has_version_columns)
+
+    def _apply_keys(self, found: dict[int, AnswerKey], spec: ExamSpec | None, filename: str,
+                    version: int | None = None, has_version_columns: bool = False) -> list[int]:
+        """Store answer keys found in a file (after checking they fit the exam).
+        With `version` chosen, only that version's key is used."""
         if version is not None:  # a specific version was chosen: keep only its key
             if version not in found:
                 raise AnswerKeyError(f"{filename} has no key for version {version}.")
@@ -370,53 +376,128 @@ class GradingSession:
     # --------------------------------------------------------- uploads ----
 
     def process_upload(self, filename: str, data: bytes, max_pages: int) -> dict:
-        """Read every page of an uploaded file. Returns a short summary."""
+        """Upload of student sheets (requires every answer key to be loaded)."""
         if not self.keys:
             raise AnswerKeyError("Upload the answer key before uploading student sheets.")
         if self.missing_versions():
             missing = ", ".join(map(str, self.missing_versions()))
             raise AnswerKeyError(f"Upload the answer key for version {missing} before "
                                  "uploading student sheets.")
+        return self.process_file(filename, data, max_pages)
+
+    def process_file(self, filename: str, data: bytes, max_pages: int,
+                     version: int | None = None) -> dict:
+        """Handle any uploaded file: answer keys, student sheets, or both.
+
+        * A CSV is an answer key, or a results.csv from this site (which is
+          loaded as in "Continue from results").
+        * A PDF or image is split into pages and each page is identified by its
+          QR code. Answer key pages are applied first (following `version`, the
+          page's "Key is for" choice), then student pages are graded -- so a
+          single PDF holding the keys and the students' sheets does both.
+        Student pages are only graded once every version has a key; otherwise
+        they are reported as not graded.
+        """
+        summary = {"file": filename, "pages": 0, "keys": [], "graded": [], "messages": [],
+                   "kind": "sheets"}
+
+        def note(source: str, message: str, level: str = "error") -> None:
+            summary["messages"].append(PageMessage(source, message, level))
+
+        if filename.lower().endswith((".csv", ".txt")):
+            if _looks_like_results_csv(data):
+                result = self.import_results(filename, data)
+                summary.update(kind="results", imported=result)
+                for w in result["warnings"]:
+                    note(filename, w, "info")
+            else:
+                summary.update(kind="key", keys=self.set_key_from_upload(filename, data, version))
+            return self._finish(summary)
+
         try:
             images = load_pages(filename, data, max_pages=max_pages)
         except UploadError as exc:
-            msg = PageMessage(filename, str(exc))
-            with self.lock:
-                self.messages.append(msg)
-            return {"file": filename, "pages": 0, "graded": [], "messages": [msg.__dict__]}
+            note(filename, str(exc))
+            return self._finish(summary)
+        summary["pages"] = len(images)
 
-        graded, messages = [], []
+        # Identify every page once.
+        key_pages, student_pages = [], []
         for page_no, image in enumerate(images, start=1):
             source = filename if len(images) == 1 else f"{filename}, page {page_no}"
             try:
-                name = self._process_page(image, source)
-                if name:
-                    graded.append(name)
+                canon, spec, who, page = _locate(image)
             except PageProblem as exc:
-                messages.append(PageMessage(source, str(exc), exc.level))
+                note(source, str(exc), exc.level)
+                continue
+            (key_pages if who.kind == "k" else student_pages).append(
+                (source, canon, spec, who, page))
 
+        if key_pages:
+            summary["keys"] = self._keys_from_pages(key_pages, filename, version, note)
+        if student_pages and not self.ready:
+            missing = self.missing_versions() or [1]
+            note(filename, f"{len(student_pages)} student sheet page(s) were not graded because "
+                           f"the answer key for version {', '.join(map(str, missing))} isn't "
+                           "loaded yet. Load the key, then upload these sheets again."
+                 if self.num_versions > 1 else
+                 f"{len(student_pages)} student sheet page(s) were not graded because no answer "
+                 "key is loaded yet. Load the key, then upload these sheets again.")
+        elif student_pages:
+            for source, canon, spec, who, page in student_pages:
+                try:
+                    name = self._grade_student_page(canon, spec, who, page)
+                    if name:
+                        summary["graded"].append(name)
+                except PageProblem as exc:
+                    note(source, str(exc), exc.level)
+        return self._finish(summary)
+
+    def _finish(self, summary: dict) -> dict:
         with self.lock:
-            self.messages.extend(messages)
+            self.messages.extend(summary["messages"])
             self.touch()
-        return {"file": filename, "pages": len(images), "graded": graded,
-                "messages": [m.__dict__ for m in messages]}
+        summary["messages"] = [m.__dict__ for m in summary["messages"]]
+        return summary
 
-    def _process_page(self, image, source: str) -> str | None:
-        """Grade one page image. Returns the student's name if page 1 was read."""
+    def _keys_from_pages(self, key_pages: list, filename: str, version: int | None,
+                         note) -> list[int]:
+        """Read answer key pages found in an uploaded file and apply them.
+        Returns the versions whose keys were set."""
+        found: dict[int, AnswerKey] = {}
+        spec_found = None
+        for source, canon, spec, who, _ in key_pages:
+            v = who.version or 1
+            if version is not None and v != version:
+                continue  # "Key is for" a different version
+            if spec_found and spec.exam_id != spec_found.exam_id:
+                note(source, "This key sheet is from a different exam than the other key "
+                             "sheets in the file, so it was skipped.")
+                continue
+            try:
+                key = _key_from_page(canon, spec, who)
+            except AnswerKeyError as exc:
+                note(source, str(exc))
+                continue
+            if key is None:
+                note(source, f"{_key_label(spec, v)} sheet is blank, so it was skipped.", "info")
+                continue
+            if v in self.keys and dict(self.keys[v].answers) == dict(key.answers):
+                note(source, f"{_key_label(spec, v)} is already loaded; skipped.", "info")
+                continue
+            found[v], spec_found = key, spec
+        if version is not None and not found and version not in self.keys:
+            note(filename, f"{filename} has no key for version {version}.")
+        if not found:
+            return []
         try:
-            canon, qr_text = locate_page(image)
-        except AlignError as exc:
-            raise PageProblem(
-                f"{exc} Make sure the whole sheet, including all four corner squares, "
-                "is visible and in focus.") from None
-        try:
-            spec, who, page = decode_qr(qr_text)
-        except ValueError as exc:
-            raise PageProblem(str(exc)) from None
+            return self._apply_keys(found, spec_found, filename)
+        except AnswerKeyError as exc:
+            note(filename, str(exc))
+            return []
 
-        if who.kind == "k":
-            raise PageProblem("This is an answer key sheet; it was skipped.", level="info")
-
+    def _grade_student_page(self, canon, spec: ExamSpec, who, page: int) -> str | None:
+        """Grade one located student page. Returns the student's name if page 1 was read."""
         with self.lock:
             self._check_same_exam(spec)
             student = self._find_student(spec.exam_id, who.student_index, who.student_name)
@@ -602,6 +683,57 @@ def _read_version(read: QuestionRead) -> tuple[int | None, str | None]:
     return min(read.marked) + 1, None
 
 
+def _locate(image) -> tuple:
+    """Find, straighten and identify a page. Returns (canon, spec, who, page).
+    Raises PageProblem with a teacher-friendly message."""
+    try:
+        canon, qr_text = locate_page(image)
+    except AlignError as exc:
+        raise PageProblem(
+            f"{exc} Make sure the whole sheet, including all four corner squares, "
+            "is visible and in focus.") from None
+    try:
+        spec, who, page = decode_qr(qr_text)
+    except ValueError as exc:
+        raise PageProblem(str(exc)) from None
+    return canon, spec, who, page
+
+
+def _key_label(spec: ExamSpec, version: int) -> str:
+    return f"The version {version} answer key" if spec.num_versions > 1 else "The answer key"
+
+
+def _key_from_page(canon, spec: ExamSpec, who) -> AnswerKey | None:
+    """Read the bubbles of an ANSWER KEY page. Returns None for a completely
+    blank key sheet; raises AnswerKeyError if it is only partly readable."""
+    label = _key_label(spec, who.version or 1)
+    reads = read_bubbles(canon, build_layout(spec)[0])
+    reads.pop(0, None)  # the version row is pre-printed on key sheets
+    if not any(r.marked or r.unclear for r in reads.values()):
+        return None
+    blank = [q for q, r in reads.items() if not r.marked and not r.unclear]
+    unclear = [q for q, r in reads.items() if r.unclear]
+    if blank or unclear:
+        parts = []
+        if blank:
+            parts.append(f"no answer marked for question(s) {', '.join(map(str, blank[:15]))}")
+        if unclear:
+            parts.append(f"faint or partly erased marks on question(s) "
+                         f"{', '.join(map(str, unclear[:15]))}")
+        raise AnswerKeyError(
+            f"{label} could not be read reliably: " + "; ".join(parts) +
+            ". Darken or clean up those bubbles and re-scan, or upload a CSV key instead.")
+    return AnswerKey(answers={q: r.marked for q, r in reads.items()},
+                     num_choices=spec.num_choices, exam_id=spec.exam_id,
+                     open_questions=frozenset(spec.open_questions))
+
+
+def _looks_like_results_csv(data: bytes) -> bool:
+    """A results.csv from this site starts with a "Student" header column."""
+    first = next((line for line in _decode(data[:4096]).splitlines() if line.strip()), "")
+    return first.split(",")[0].strip().strip('"').lower() == "student"
+
+
 def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], ExamSpec]:
     """Read ANSWER KEY sheet(s) from a scanned PDF or photo. A PDF may hold
     the key sheets for several versions; each one's QR code says its version."""
@@ -617,9 +749,8 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
     problems = []
     for image in images:
         try:
-            canon, qr_text = locate_page(image)
-            spec, who, page = decode_qr(qr_text)
-        except (AlignError, ValueError) as exc:
+            canon, spec, who, _ = _locate(image)
+        except PageProblem as exc:
             problems.append(str(exc))
             continue
         if who.kind != "k":
@@ -629,32 +760,14 @@ def _read_key_sheets(filename: str, data: bytes) -> tuple[dict[int, AnswerKey], 
             continue
         if spec_found and spec.exam_id != spec_found.exam_id:
             raise AnswerKeyError(f"{filename} holds key sheets from different exams.")
-        version = who.version or 1
-        label = f"The version {version} answer key" if spec.num_versions > 1 else "The answer key"
-
-        reads = read_bubbles(canon, build_layout(spec)[0])
-        reads.pop(0, None)  # the version row is pre-printed on key sheets
-        if not any(r.marked or r.unclear for r in reads.values()):
+        key = _key_from_page(canon, spec, who)
+        if key is None:
             # A completely empty key sheet (e.g. a version whose key wasn't
             # entered yet): skip it; other key sheets in the file still count.
-            problems.append(f"{label} sheet is blank. Fill it in and scan it, or upload a "
-                            "CSV key for it.")
+            problems.append(f"{_key_label(spec, who.version or 1)} sheet is blank. Fill it in "
+                            "and scan it, or upload a CSV key for it.")
             continue
-        blank = [q for q, r in reads.items() if not r.marked and not r.unclear]
-        unclear = [q for q, r in reads.items() if r.unclear]
-        if blank or unclear:
-            parts = []
-            if blank:
-                parts.append(f"no answer marked for question(s) {', '.join(map(str, blank[:15]))}")
-            if unclear:
-                parts.append(f"faint or partly erased marks on question(s) "
-                             f"{', '.join(map(str, unclear[:15]))}")
-            raise AnswerKeyError(
-                f"{label} could not be read reliably: " + "; ".join(parts) +
-                ". Darken or clean up those bubbles and re-scan, or upload a CSV key instead.")
-        keys[version] = AnswerKey(answers={q: r.marked for q, r in reads.items()},
-                                  num_choices=spec.num_choices, exam_id=spec.exam_id,
-                                  open_questions=frozenset(spec.open_questions))
+        keys[who.version or 1] = key
         spec_found = spec
 
     if keys:
