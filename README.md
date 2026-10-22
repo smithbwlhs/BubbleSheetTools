@@ -16,6 +16,9 @@ scanned sheets, and export the results as CSV files and PNG charts.
   - `results.csv`: one row per student, with every answer
   - `item_analysis.csv`: % correct, # missed and choice counts per question
   - `score_distribution.png`, `most_missed.png`, `choice_distribution.png`
+  - `student_reports.pdf`: one page per student, like a scantron printout, with their
+    score and every question (missed ones highlighted). A checkbox leaves the correct
+    answers off, for tests you reuse.
 - **Paste or upload your answer key** when creating sheets (optional): one answer per line
   (`B`, `AC`, `FR` for free response), numbered lines, a CSV, or a markdown table. The key
   sheets come pre-filled, and the form's question count, open questions and choices are set

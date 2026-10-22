@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
 from .grading import GradingSession, StudentResult, letters  # noqa: E402
+from .reports import student_reports_pdf  # noqa: E402
 from .sheet_layout import CHOICE_LETTERS, format_question_list  # noqa: E402
 
 # ---- chart styling (light surface; PNGs are usually printed or pasted) ----
@@ -343,6 +344,7 @@ def export_files(session: GradingSession) -> dict[str, tuple[str, callable]]:
     Per-question charts are made for each version separately."""
     files = {
         "results.csv": ("text/csv", results_csv),
+        "student_reports.pdf": ("application/pdf", student_reports_pdf),
         "item_analysis.csv": ("text/csv", item_analysis_csv),
         "score_distribution.png": ("image/png", score_distribution_png),
     }

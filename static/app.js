@@ -640,6 +640,12 @@ function setupGrading() {
       json: { num_versions: Number(e.target.value) } }));
   }));
 
+  // Student reports: with or without the correct answers.
+  $("#reports-answers").addEventListener("change", (e) => {
+    $("#reports-link").href = "/api/grade/export/student_reports.pdf" +
+      (e.target.checked ? "" : "?answers=false");
+  });
+
   $("#multi-mode").addEventListener("change", (e) => handleApiError(async () => {
     renderGrade(await api("/api/grade/settings", { method: "POST", json: { multi_mode: e.target.value } }));
   }));
@@ -871,6 +877,7 @@ const EXPORT_LABELS = {
   "results.csv": "Results CSV", "item_analysis.csv": "Question analysis CSV",
   "score_distribution": "Score distribution", "most_missed": "Most missed",
   "choice_distribution": "Choice distribution", "all_results.zip": "Everything (ZIP)",
+  "student_reports.pdf": "Student reports (PDF)",
 };
 function exportLabel(name) {
   if (EXPORT_LABELS[name]) return EXPORT_LABELS[name];
@@ -881,7 +888,9 @@ function exportLabel(name) {
 
 /** Download buttons and chart previews; per-version charts on multi-version exams. */
 function renderDownloads(state) {
-  $("#downloads").replaceChildren(...state.exports.map((name, i) =>
+  // Student reports have their own button (with the "correct answers" option).
+  const exports = state.exports.filter((n) => n !== "student_reports.pdf");
+  $("#downloads").replaceChildren(...exports.map((name, i) =>
     el("a", { class: "button " + (i === 0 ? "primary" : "ghost"),
               href: `/api/grade/export/${name}` }, exportLabel(name))));
 

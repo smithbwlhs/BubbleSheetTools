@@ -293,6 +293,16 @@
             </div>
             <div class="table-wrap"><table id="results-table"></table></div>
 
+            <h3>Student reports</h3>
+            <p class="hint">One page per student, like a scantron printout: their score and
+              every question, with missed ones highlighted. Print the PDF and hand it out.</p>
+            <div class="row">
+              <a id="reports-link" class="button primary" href="/api/grade/export/student_reports.pdf">
+                Student reports (PDF)</a>
+              <label class="check"><input id="reports-answers" type="checkbox" checked>
+                Include the correct answers</label>
+            </div>
+
             <h3>Downloads</h3>
             <div id="downloads" class="downloads"></div>
             <div id="charts" class="charts"></div>

@@ -24,7 +24,8 @@ Routes
     POST /api/grade/written     score for a hand-graded written response or open question
     POST /api/grade/settings    scoring mode for multi-answer questions
     GET  /api/grade/snippet/{student}/{question}.png   image of a flagged row
-    GET  /api/grade/export/{name}                      CSV / PNG / ZIP downloads
+    GET  /api/grade/export/{name}                      CSV / PNG / PDF / ZIP downloads
+         (student_reports.pdf?answers=false hides the correct answers)
     POST /api/grade/clear       delete this session's data now
 """
 
@@ -41,6 +42,7 @@ from . import auth, export, sessions
 from .answer_key import AnswerKeyError, parse_form_keys
 from .config import settings
 from .grading import GradingSession, letters
+from .reports import student_reports_pdf
 from .roster import RosterError, parse_csv, parse_pasted
 from .sheet_generator import generate_sheets_pdf
 from .sheet_layout import ExamSpec, LayoutError, max_written_height_in, parse_question_list
@@ -480,7 +482,9 @@ def grade_snippet(student_index: int, question: int,
 
 
 @app.get("/api/grade/export/{name}")
-def grade_export(name: str, inline: bool = False, session: GradingSession = Depends(_session)):
+def grade_export(name: str, inline: bool = False, answers: bool = True,
+                 session: GradingSession = Depends(_session)):
+    """Downloads. `answers=false` leaves correct answers off the student reports."""
     if not session.keys or not any(s.answers is not None for s in session.students.values()):
         raise _bad("There are no graded sheets to export yet.")
     files = {**export.export_files(session),
@@ -488,6 +492,8 @@ def grade_export(name: str, inline: bool = False, session: GradingSession = Depe
     if name not in files:
         raise _bad("Unknown export.", 404)
     media_type, build = files[name]
+    if name == "student_reports.pdf":
+        build = lambda sess: student_reports_pdf(sess, show_answers=answers)  # noqa: E731
     with session.lock:
         data = build(session)
     prefix = f"{_safe_filename(session.spec.class_name)}_{_safe_filename(session.spec.exam_name)}"
