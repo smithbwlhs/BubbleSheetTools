@@ -55,50 +55,84 @@ def _to_gray_array(img: Image.Image) -> np.ndarray:
     return np.array(img)
 
 
-def load_pages(filename: str, data: bytes, max_pages: int = 200,
-               first_only: bool = False) -> list[np.ndarray]:
-    """Return one grayscale numpy image per page in the uploaded file.
+class PageSource:
+    """An uploaded file opened for reading ONE PAGE AT A TIME.
+
+    A page image is about 4 MB at scan resolution, so a large PDF must never be
+    turned into a list of images all at once: that is what exhausted the
+    server's memory. Iterate (or call page(i)) and let each page go when done.
 
     With first_only, a longer PDF is not an error: only its first `max_pages`
     pages are read (used for answer keys, whose sheets come first).
     """
-    if not data:
-        raise UploadError(f"{filename} is empty.")
-    ext = _extension(filename)
 
-    if ext == ".pdf" or data[:5] == b"%PDF-":
+    def __init__(self, filename: str, data: bytes, max_pages: int = 200,
+                 first_only: bool = False):
+        if not data:
+            raise UploadError(f"{filename} is empty.")
+        self.filename = filename
+        self._data = data
+        self._doc = None
+        ext = _extension(filename)
+
+        if ext == ".pdf" or data[:5] == b"%PDF-":
+            try:
+                self._doc = pymupdf.open(stream=data, filetype="pdf")
+            except Exception as exc:  # PyMuPDF raises several exception types
+                raise UploadError(f"{filename} could not be opened as a PDF.") from exc
+            total = self._doc.page_count
+            if total == 0:
+                raise UploadError(f"{filename} has no pages.")
+        elif ext in (".heic", ".heif") and not HEIC_SUPPORTED:
+            raise UploadError(f"{filename}: HEIC photos are not supported on this server. "
+                              "Export the photo as JPG and upload it again.")
+        elif ext in IMAGE_EXTENSIONS or ext == "":
+            try:
+                with Image.open(io.BytesIO(data)) as img:
+                    # Multi-page TIFFs have several frames; ordinary photos have one.
+                    total = getattr(img, "n_frames", 1)
+            except Exception as exc:
+                raise UploadError(f"{filename} could not be opened as an image.") from exc
+        else:
+            raise UploadError(f"{filename}: unsupported file type. "
+                              "Upload PDF, JPG, PNG or HEIC files.")
+
+        if total > max_pages and not first_only:
+            raise UploadError(f"{filename} has {total} pages; the limit is {max_pages}.")
+        self.count = min(total, max_pages)
+
+    def page(self, index: int) -> np.ndarray:
+        """Render page `index` (0-based) as a grayscale image."""
+        if self._doc is not None:
+            pix = self._doc[index].get_pixmap(dpi=PDF_RENDER_DPI, colorspace=pymupdf.csGRAY,
+                                              alpha=False)
+            return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).copy()
         try:
-            doc = pymupdf.open(stream=data, filetype="pdf")
-        except Exception as exc:  # PyMuPDF raises several exception types
-            raise UploadError(f"{filename} could not be opened as a PDF.") from exc
-        if doc.page_count == 0:
-            raise UploadError(f"{filename} has no pages.")
-        if doc.page_count > max_pages and not first_only:
-            raise UploadError(f"{filename} has {doc.page_count} pages; the limit is {max_pages}.")
-        pages = []
-        for page in list(doc)[:max_pages]:
-            pix = page.get_pixmap(dpi=PDF_RENDER_DPI, colorspace=pymupdf.csGRAY, alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-            pages.append(arr.copy())
-        doc.close()
-        return pages
-
-    if ext in (".heic", ".heif") and not HEIC_SUPPORTED:
-        raise UploadError(f"{filename}: HEIC photos are not supported on this server. "
-                          "Export the photo as JPG and upload it again.")
-
-    if ext in IMAGE_EXTENSIONS or ext == "":
-        try:
-            with Image.open(io.BytesIO(data)) as img:
-                frames = []
-                # Multi-page TIFFs have several frames; ordinary photos have one.
-                for i in range(min(getattr(img, "n_frames", 1), max_pages)):
-                    img.seek(i)
-                    frames.append(_to_gray_array(img.copy()))
-                return frames
-        except UploadError:
-            raise
+            with Image.open(io.BytesIO(self._data)) as img:
+                img.seek(index)
+                return _to_gray_array(img.copy())
         except Exception as exc:
-            raise UploadError(f"{filename} could not be opened as an image.") from exc
+            raise UploadError(f"{self.filename} could not be opened as an image.") from exc
 
-    raise UploadError(f"{filename}: unsupported file type. Upload PDF, JPG, PNG or HEIC files.")
+    def __iter__(self):
+        for i in range(self.count):
+            yield self.page(i)
+
+    def close(self) -> None:
+        if self._doc is not None:
+            self._doc.close()
+            self._doc = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def load_pages(filename: str, data: bytes, max_pages: int = 200,
+               first_only: bool = False) -> list[np.ndarray]:
+    """Every page as an image, all in memory. Only for small files (a key
+    sheet, a few photos); use PageSource for anything that may be large."""
+    with PageSource(filename, data, max_pages, first_only) as source:
+        return list(source)

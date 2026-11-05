@@ -18,7 +18,7 @@ from .answer_key import AnswerKey, AnswerKeyError, parse_key_csv, parse_versione
 from .results_import import ImportedResults, parse_results_csv
 from .scanner.align import AlignError, locate_page
 from .scanner.bubbles import QuestionRead, read_bubbles, row_snippet_png
-from .scanner.loader import UploadError, load_pages
+from .scanner.loader import PageSource, UploadError, load_pages
 from .sheet_layout import (
     CHOICE_LETTERS, MAX_VERSIONS, ExamSpec, build_layout, decode_qr, format_question_list,
 )
@@ -415,42 +415,69 @@ class GradingSession:
             return self._finish(summary)
 
         try:
-            images = load_pages(filename, data, max_pages=max_pages)
+            pages = PageSource(filename, data, max_pages=max_pages)
         except UploadError as exc:
             note(filename, str(exc))
             return self._finish(summary)
-        summary["pages"] = len(images)
 
-        # Identify every page once.
-        key_pages, student_pages = [], []
-        for page_no, image in enumerate(images, start=1):
-            source = filename if len(images) == 1 else f"{filename}, page {page_no}"
-            try:
-                canon, spec, who, page = _locate(image)
-            except PageProblem as exc:
-                note(source, str(exc), exc.level)
-                continue
-            (key_pages if who.kind == "k" else student_pages).append(
-                (source, canon, spec, who, page))
+        # Pages are read ONE AT A TIME and let go straight after, so memory stays
+        # flat however large the PDF is (holding every page image at once is
+        # what ran the server out of memory).
+        with pages:
+            summary["pages"] = pages.count
 
-        if key_pages:
-            summary["keys"] = self._keys_from_pages(key_pages, filename, version, note)
-        if student_pages and not self.ready:
-            missing = self.missing_versions() or [1]
-            note(filename, f"{len(student_pages)} student sheet page(s) were not graded because "
-                           f"the answer key for version {', '.join(map(str, missing))} isn't "
-                           "loaded yet. Load the key, then upload these sheets again."
-                 if self.num_versions > 1 else
-                 f"{len(student_pages)} student sheet page(s) were not graded because no answer "
-                 "key is loaded yet. Load the key, then upload these sheets again.")
-        elif student_pages:
-            for source, canon, spec, who, page in student_pages:
+            def source(i: int) -> str:
+                return filename if pages.count == 1 else f"{filename}, page {i + 1}"
+
+            def locate(i: int):
+                try:
+                    return _locate(pages.page(i))
+                except PageProblem as exc:
+                    note(source(i), str(exc), exc.level)
+                except UploadError as exc:
+                    note(source(i), str(exc))
+                return None
+
+            def grade(i: int, located) -> None:
+                canon, spec, who, page = located
                 try:
                     name = self._grade_student_page(canon, spec, who, page)
                     if name:
                         summary["graded"].append(name)
                 except PageProblem as exc:
-                    note(source, str(exc), exc.level)
+                    note(source(i), str(exc), exc.level)
+
+            waiting = []  # student pages seen before every key was loaded (indexes only)
+            for i in range(pages.count):
+                located = locate(i)
+                if located is None:
+                    continue
+                if located[2].kind == "k":
+                    summary["keys"] += self._key_from_located(source(i), located, filename,
+                                                              version, note)
+                elif self.ready:
+                    grade(i, located)
+                else:
+                    waiting.append(i)
+
+            # A key sheet came after some students' sheets: go back for those pages.
+            if waiting and self.ready:
+                for i in waiting:
+                    located = locate(i)
+                    if located is not None:
+                        grade(i, located)
+            elif waiting:
+                missing = self.missing_versions() or [1]
+                note(filename,
+                     f"{len(waiting)} student sheet page(s) were not graded because the answer "
+                     f"key for version {', '.join(map(str, missing))} isn't loaded yet. Load the "
+                     "key, then upload these sheets again." if self.num_versions > 1 else
+                     f"{len(waiting)} student sheet page(s) were not graded because no answer "
+                     "key is loaded yet. Load the key, then upload these sheets again.")
+
+        if version is not None and version not in self.keys:
+            note(filename, f"{filename} has no key for version {version}.")
+        summary["keys"] = sorted(set(summary["keys"]))
         return self._finish(summary)
 
     def _finish(self, summary: dict) -> dict:
@@ -460,40 +487,30 @@ class GradingSession:
         summary["messages"] = [m.__dict__ for m in summary["messages"]]
         return summary
 
-    def _keys_from_pages(self, key_pages: list, filename: str, version: int | None,
-                         note) -> list[int]:
-        """Read answer key pages found in an uploaded file and apply them.
-        Returns the versions whose keys were set."""
-        found: dict[int, AnswerKey] = {}
-        spec_found = None
-        for source, canon, spec, who, _ in key_pages:
-            v = who.version or 1
-            if version is not None and v != version:
-                continue  # "Key is for" a different version
-            if spec_found and spec.exam_id != spec_found.exam_id:
-                note(source, "This key sheet is from a different exam than the other key "
-                             "sheets in the file, so it was skipped.")
-                continue
-            try:
-                key = _key_from_page(canon, spec, who)
-            except AnswerKeyError as exc:
-                note(source, str(exc))
-                continue
-            if key is None:
-                note(source, f"{_key_label(spec, v)} sheet is blank, so it was skipped.", "info")
-                continue
-            if v in self.keys and dict(self.keys[v].answers) == dict(key.answers):
-                note(source, f"{_key_label(spec, v)} is already loaded; skipped.", "info")
-                continue
-            found[v], spec_found = key, spec
-        if version is not None and not found and version not in self.keys:
-            note(filename, f"{filename} has no key for version {version}.")
-        if not found:
+    def _key_from_located(self, source: str, located, filename: str, version: int | None,
+                          note) -> list[int]:
+        """Read one answer key page found in an uploaded file and apply it.
+        Returns the version set ([] if the page was skipped)."""
+        canon, spec, who, _ = located
+        v = who.version or 1
+        if version is not None and v != version:
+            return []  # "Key is for" a different version
+        try:
+            key = _key_from_page(canon, spec, who)
+        except AnswerKeyError as exc:
+            note(source, str(exc))
+            return []
+        if key is None:
+            note(source, f"{_key_label(spec, v)} sheet is blank, so it was skipped.", "info")
+            return []
+        if v in self.keys and dict(self.keys[v].answers) == dict(key.answers):
+            note(source, f"{_key_label(spec, v)} is already loaded; skipped.", "info")
             return []
         try:
-            return self._apply_keys(found, spec_found, filename)
+            # Checks it fits the exam, e.g. the same print batch as any key already loaded.
+            return self._apply_keys({v: key}, spec, filename)
         except AnswerKeyError as exc:
-            note(filename, str(exc))
+            note(source, str(exc))
             return []
 
     def _grade_student_page(self, canon, spec: ExamSpec, who, page: int) -> str | None:

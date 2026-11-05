@@ -8,6 +8,12 @@ services:
     restart: unless-stopped
     expose:
       - "8000"
+    # Hard memory cap: if the app ever runs out, Docker restarts just the app
+    # (in seconds) instead of the whole droplet freezing. Uploads are read one
+    # page at a time, so normal use stays far below this. Override with
+    # APP_MEMORY_LIMIT in .env (e.g. 1500m on a larger droplet).
+    mem_limit: ${APP_MEMORY_LIMIT:-900m}
+    memswap_limit: ${APP_MEMORY_LIMIT:-900m}   # no swapping inside the container
 
   caddy:
     image: caddy:2

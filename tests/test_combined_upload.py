@@ -128,3 +128,28 @@ def test_api_files_endpoint(exam):
     r = client.post("/api/grade/files", files={"file": ("key.csv", b"1,A\n2,B\n")})
     assert r.status_code == 400  # a changed key after grading started
     client.post("/api/grade/clear")
+
+
+def test_large_uploads_are_read_one_page_at_a_time():
+    """Memory must stay flat for big PDFs (holding every page crashed the server).
+    Before the fix, 25 pages peaked around 200 MB; now it's well under 100 MB."""
+    import tracemalloc
+
+    from app.answer_key import parse_form_keys as keys_from
+    spec = ExamSpec("Bio", "Final", 30, 4)
+    keys = keys_from(["\n".join("ABCD"[q % 4] for q in range(30))])
+    pages = render_pdf_pages(generate_sheets_pdf(spec, [f"S{i}" for i in range(24)], keys))
+    rng = np.random.default_rng(2)
+    key = {q: set(v) for q, v in keys[1].answers.items()}
+    scan = images_to_pdf([pages[0]] + [fill_bubbles(p, spec, key, rng) for p in pages[1:]])
+    del pages
+
+    session = GradingSession(user_id="t")
+    tracemalloc.start()
+    try:
+        summary = session.process_file("scan.pdf", scan, 100)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(summary["graded"]) == 24
+    assert peak < 100e6, f"peak memory {peak / 1e6:.0f} MB"
